@@ -62,7 +62,7 @@ To run Verbodus locally, ensure you have:
 
 1. Clone the repository and navigate to the project directory:
    ```bash
-   cd "LLM Speedometer"
+   cd "Verbodus"
    ```
 
 2. Install dependencies:
