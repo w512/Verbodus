@@ -225,6 +225,7 @@ onBeforeUnmount(() => {
                 <div class="run-model-meta">
                   <span class="model-name">🤖 {{ run.modelName }}</span>
                   <span class="profile-tag">🔌 {{ run.configName }}</span>
+                  <span v-if="run.iterations > 1" class="runs-tag">×{{ run.iterations }} median</span>
                 </div>
                 <div class="run-stats">
                   <span>Speed: <strong>{{ run.tps }} tps</strong></span>
@@ -448,6 +449,15 @@ onBeforeUnmount(() => {
   padding: 2px 6px;
   border-radius: 4px;
   color: var(--text-secondary);
+}
+
+.runs-tag {
+  font-size: 10px;
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--accent-indigo);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
 }
 
 .run-stats {

@@ -28,6 +28,8 @@ const DEFAULT_PRESETS = [
     maxTokens: 512,
     systemPrompt: "You are a helpful assistant.",
     stream: true,
+    iterations: 1, // benchmark runs to average (issue #3)
+    warmup: 0,     // leading runs discarded (cold-start) before averaging
   },
   {
     name: "LM Studio (Default)",
@@ -38,6 +40,8 @@ const DEFAULT_PRESETS = [
     maxTokens: 512,
     systemPrompt: "You are a helpful assistant.",
     stream: true,
+    iterations: 1, // benchmark runs to average (issue #3)
+    warmup: 0,     // leading runs discarded (cold-start) before averaging
   },
   {
     name: "vLLM / Local Engine",
@@ -48,8 +52,15 @@ const DEFAULT_PRESETS = [
     maxTokens: 512,
     systemPrompt: "You are a helpful assistant.",
     stream: true,
+    iterations: 1,
+    warmup: 0,
   }
 ];
+
+// Older saved profiles may predate the iterations/warmup fields — backfill them.
+function withBenchDefaults(profile) {
+  return { iterations: 1, warmup: 0, ...profile };
+}
 
 // Load saved data from localStorage
 const storedProfiles = localStorage.getItem("speedometer_profiles");
@@ -67,7 +78,7 @@ export const store = reactive({
   activeProfileIndex: 0,
   
   // Active Configuration form values
-  config: { ...initialProfiles[0] },
+  config: withBenchDefaults(initialProfiles[0]),
 
   // Benchmarked runs history
   runs: initialRuns,
@@ -88,10 +99,21 @@ export const store = reactive({
     error: ""
   },
 
+  // Multi-run series telemetry (issue #3). When total === 1 this stays inert
+  // and the UI shows the single live run as before.
+  series: {
+    status: "idle",   // 'idle' | 'running' | 'completed' | 'error' | 'cancelled'
+    total: 1,         // warmup + measured runs
+    warmup: 0,        // leading runs discarded
+    current: 0,       // 1-based index of the in-flight run
+    kept: 0,          // number of measured (non-warmup) runs collected
+    agg: null,        // { ttft, tpot, tps } each { median, min, max } | null
+  },
+
   // Actions
   selectProfile(index) {
     this.activeProfileIndex = index;
-    this.config = { ...this.profiles[index] };
+    this.config = withBenchDefaults(this.profiles[index]);
   },
 
   saveProfile(name) {
@@ -109,7 +131,7 @@ export const store = reactive({
     if (this.profiles.length <= 1) return;
     this.profiles.splice(index, 1);
     this.activeProfileIndex = Math.min(this.activeProfileIndex, this.profiles.length - 1);
-    this.config = { ...this.profiles[this.activeProfileIndex] };
+    this.config = withBenchDefaults(this.profiles[this.activeProfileIndex]);
     localStorage.setItem("speedometer_profiles", JSON.stringify(this.profiles));
   },
 
@@ -154,21 +176,14 @@ watch(
   { deep: true }
 );
 
-// High-fidelity SSE Benchmarking stream consumer
-export async function runBenchmark(promptText) {
-  store.resetActiveRun();
-  store.activeRun.status = "running";
-  store.activeRun.prompt = promptText;
-
+// Builds the OpenAI-compatible chat/completions request from the active config.
+function buildRequest(promptText) {
   const url = store.config.url.trim().replace(/\/$/, "");
   const endpoint = `${url}/chat/completions`;
-  const apiKey = store.config.apiKey;
 
-  const headers = {
-    "Content-Type": "application/json",
-  };
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
+  const headers = { "Content-Type": "application/json" };
+  if (store.config.apiKey) {
+    headers["Authorization"] = `Bearer ${store.config.apiKey}`;
   }
 
   const messages = [];
@@ -183,19 +198,51 @@ export async function runBenchmark(promptText) {
     temperature: parseFloat(store.config.temperature) || 0.7,
     max_tokens: parseInt(store.config.maxTokens) || 512,
     stream: store.config.stream,
-    stream_options: store.config.stream ? { include_usage: true } : undefined
+    stream_options: store.config.stream ? { include_usage: true } : undefined,
   };
+
+  return { endpoint, headers, body };
+}
+
+// Snapshot of the live telemetry — one element of a series.
+function snapshotRun() {
+  return {
+    ttft: store.activeRun.ttft,
+    tpot: store.activeRun.tpot,
+    tps: store.activeRun.tps,
+    tokenCount: store.activeRun.tokenCount,
+    promptTokens: store.activeRun.promptTokens,
+    completionTokens: store.activeRun.completionTokens,
+    totalTokens: store.activeRun.totalTokens,
+    responseText: store.activeRun.responseText,
+    streamDataPoints: [...store.activeRun.streamDataPoints],
+  };
+}
+
+// Executes a single high-fidelity request, updating the live telemetry as it
+// streams. Returns a snapshot of the run's metrics; throws on HTTP/abort errors
+// (the orchestrator decides how to surface them). Does not touch series state
+// or history — that is the caller's job.
+async function executeRun(promptText, controller) {
+  // Reset only the per-run live fields, leaving status/error/prompt to the caller.
+  store.activeRun.responseText = "";
+  store.activeRun.ttft = 0;
+  store.activeRun.tpot = 0;
+  store.activeRun.tps = 0;
+  store.activeRun.tokenCount = 0;
+  store.activeRun.promptTokens = 0;
+  store.activeRun.completionTokens = 0;
+  store.activeRun.totalTokens = 0;
+  store.activeRun.streamDataPoints = [];
+
+  const { endpoint, headers, body } = buildRequest(promptText);
 
   const startTime = performance.now();
   let firstTokenTime = null;
   let lastTokenTime = null;
   let tokenCount = 0;
 
-  // Set up cancellation + inactivity timeout (issue #4)
-  const controller = new AbortController();
-  activeController = controller;
-  abortKind = null;
-
+  // Inactivity timeout for this request (issue #4); aborts the shared controller.
   let stallTimer = null;
   const armStall = () => {
     clearTimeout(stallTimer);
@@ -222,15 +269,14 @@ export async function runBenchmark(promptText) {
     if (!store.config.stream) {
       // Non-streaming Mode
       const data = await response.json();
-      const endTime = performance.now();
-      const totalTime = endTime - startTime;
-      
+      const totalTime = performance.now() - startTime;
+
       const text = data.choices?.[0]?.message?.content || "";
       const usage = data.usage || {};
-      
+
       const compTokens = usage.completion_tokens || text.split(/\s+/).filter(Boolean).length || 1;
       const promptTokens = usage.prompt_tokens || promptText.split(/\s+/).filter(Boolean).length || 1;
-      
+
       store.activeRun.responseText = text;
       store.activeRun.tokenCount = compTokens;
       store.activeRun.promptTokens = promptTokens;
@@ -246,13 +292,9 @@ export async function runBenchmark(promptText) {
       store.activeRun.tps = parseFloat((compTokens / (totalTime / 1000)).toFixed(2));
       store.activeRun.streamDataPoints = [
         { time: 0, tps: 0 },
-        { time: totalTime / 1000, tps: store.activeRun.tps }
+        { time: totalTime / 1000, tps: store.activeRun.tps },
       ];
-      store.activeRun.status = "completed";
-      
-      // Save Run to History
-      saveActiveRunToHistory();
-      return;
+      return snapshotRun();
     }
 
     // Streaming Mode
@@ -281,7 +323,7 @@ export async function runBenchmark(promptText) {
 
             // 1. Extract content delta
             const content = data.choices?.[0]?.delta?.content || "";
-            
+
             // 2. Extract metrics if available (e.g. usage statistics)
             if (data.usage) {
               store.activeRun.promptTokens = data.usage.prompt_tokens;
@@ -315,7 +357,7 @@ export async function runBenchmark(promptText) {
                 store.activeRun.tps = currentTps;
                 store.activeRun.streamDataPoints.push({
                   time: parseFloat(elapsedSecs.toFixed(2)),
-                  tps: currentTps
+                  tps: currentTps,
                 });
               }
             }
@@ -352,32 +394,75 @@ export async function runBenchmark(promptText) {
     // Keep the audited token count consistent with the metrics source
     store.activeRun.tokenCount = tokensForMetrics;
     store.activeRun.totalTokens = store.activeRun.promptTokens + store.activeRun.completionTokens;
+
+    return snapshotRun();
+  } finally {
+    clearTimeout(stallTimer);
+  }
+}
+
+// Orchestrates a benchmark series: `warmup` discarded runs followed by
+// `iterations` measured runs, then aggregates the measured ones (issue #3).
+// With iterations=1/warmup=0 this is a single run, exactly as before.
+export async function runBenchmark(promptText) {
+  store.resetActiveRun();
+  store.activeRun.status = "running";
+  store.activeRun.prompt = promptText;
+
+  const iterations = Math.max(1, parseInt(store.config.iterations) || 1);
+  const warmup = Math.max(0, parseInt(store.config.warmup) || 0);
+  const total = iterations + warmup;
+
+  // Shared controller so a single cancel/timeout aborts the whole series.
+  const controller = new AbortController();
+  activeController = controller;
+  abortKind = null;
+
+  store.series.status = "running";
+  store.series.total = total;
+  store.series.warmup = warmup;
+  store.series.current = 0;
+  store.series.kept = 0;
+  store.series.agg = null;
+
+  const measured = [];
+  try {
+    for (let i = 0; i < total; i++) {
+      store.series.current = i + 1;
+      const result = await executeRun(promptText, controller);
+      if (i >= warmup) {
+        measured.push(result);
+        store.series.kept = measured.length;
+      }
+    }
+
+    store.series.agg = aggregate(measured);
+    store.series.status = "completed";
     store.activeRun.status = "completed";
-
-    // Save Run to History
-    saveActiveRunToHistory();
-
+    saveSeriesToHistory(promptText, measured, store.series.agg);
   } catch (err) {
     const aborted = abortKind || err.name === "AbortError";
     if (aborted && abortKind === "user") {
       // Keep any partial output; this was a deliberate stop, not a failure.
       store.activeRun.status = "cancelled";
+      store.series.status = "cancelled";
       store.activeRun.error = "Benchmark cancelled.";
     } else if (aborted) {
       store.activeRun.status = "error";
+      store.series.status = "error";
       store.activeRun.error = `Request timed out after ${STALL_TIMEOUT_MS / 1000}s with no response.`;
     } else {
       store.activeRun.status = "error";
+      store.series.status = "error";
       store.activeRun.error = err.message;
     }
     console.error("Benchmark error:", err);
   } finally {
-    clearTimeout(stallTimer);
     activeController = null;
   }
 }
 
-// Abort the in-flight benchmark, if any (issue #4).
+// Abort the in-flight benchmark/series, if any (issue #4).
 export function cancelBenchmark() {
   if (activeController) {
     abortKind = "user";
@@ -385,23 +470,53 @@ export function cancelBenchmark() {
   }
 }
 
-function saveActiveRunToHistory() {
+// --- Aggregation helpers (issue #3) ---
+
+function median(sortedNums) {
+  const n = sortedNums.length;
+  const mid = Math.floor(n / 2);
+  return n % 2 ? sortedNums[mid] : (sortedNums[mid - 1] + sortedNums[mid]) / 2;
+}
+
+// Per-metric { median, min, max } over the measured runs. Returns null for a
+// metric when no run reported it (e.g. TTFT/TPOT in non-streaming mode).
+function aggregate(runs) {
+  const statsFor = (key) => {
+    const vals = runs.map((r) => r[key]).filter((v) => typeof v === "number");
+    if (vals.length === 0) return null;
+    const sorted = [...vals].sort((a, b) => a - b);
+    return { median: median(sorted), min: sorted[0], max: sorted[sorted.length - 1] };
+  };
+  return { ttft: statsFor("ttft"), tpot: statsFor("tpot"), tps: statsFor("tps") };
+}
+
+// Saves one aggregated entry per series. The displayed ttft/tpot/tps use the
+// median (so the Comparison view contrasts medians); the response text and
+// throughput curve come from the last measured run.
+function saveSeriesToHistory(promptText, measured, agg) {
+  if (measured.length === 0) return;
+  const last = measured[measured.length - 1];
+  const medianOf = (stat, decimals) =>
+    stat == null ? null : decimals ? parseFloat(stat.median.toFixed(decimals)) : Math.round(stat.median);
+
   const newRun = {
     id: Date.now().toString(),
     timestamp: new Date().toISOString(),
     configName: store.profiles[store.activeProfileIndex].name,
     modelName: store.config.model,
     url: store.config.url,
-    prompt: store.activeRun.prompt,
-    responseText: store.activeRun.responseText,
-    ttft: store.activeRun.ttft,
-    tpot: store.activeRun.tpot,
-    tps: store.activeRun.tps,
-    tokenCount: store.activeRun.tokenCount,
-    promptTokens: store.activeRun.promptTokens,
-    completionTokens: store.activeRun.completionTokens,
-    totalTokens: store.activeRun.totalTokens,
-    streamDataPoints: [...store.activeRun.streamDataPoints]
+    prompt: promptText,
+    responseText: last.responseText,
+    ttft: medianOf(agg.ttft, 0),
+    tpot: medianOf(agg.tpot, 0),
+    tps: medianOf(agg.tps, 2) ?? 0,
+    tokenCount: last.tokenCount,
+    promptTokens: last.promptTokens,
+    completionTokens: last.completionTokens,
+    totalTokens: last.totalTokens,
+    streamDataPoints: [...last.streamDataPoints],
+    iterations: measured.length, // number of measured runs averaged
+    agg,                         // full { median, min, max } per metric
   };
   store.saveRun(newRun);
 }

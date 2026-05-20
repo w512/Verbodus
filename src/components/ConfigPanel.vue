@@ -66,14 +66,38 @@ import { store } from "../store/store.js";
 
         <div class="form-row">
           <label for="max-tokens">Max Output Tokens</label>
-          <input 
-            id="max-tokens" 
-            v-model.number="store.config.maxTokens" 
-            type="number" 
-            min="1" 
-            max="8192" 
+          <input
+            id="max-tokens"
+            v-model.number="store.config.maxTokens"
+            type="number"
+            min="1"
+            max="8192"
           />
         </div>
+
+        <div class="form-row two-col">
+          <div>
+            <label for="iterations">Benchmark Runs</label>
+            <input
+              id="iterations"
+              v-model.number="store.config.iterations"
+              type="number"
+              min="1"
+              max="100"
+            />
+          </div>
+          <div>
+            <label for="warmup">Warm-up</label>
+            <input
+              id="warmup"
+              v-model.number="store.config.warmup"
+              type="number"
+              min="0"
+              max="20"
+            />
+          </div>
+        </div>
+        <p class="hint">Runs are averaged (median); warm-up runs are discarded to skip cold-start.</p>
 
         <div class="form-row flex-row">
           <label for="stream-toggle">Enable Token Streaming</label>
@@ -167,6 +191,22 @@ import { store } from "../store/store.js";
   flex-direction: row;
   justify-content: space-between;
   align-items: center;
+}
+
+.two-col {
+  flex-direction: row;
+  gap: 12px;
+}
+
+.two-col > div {
+  flex: 1;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: -8px;
+  line-height: 1.4;
 }
 
 .slider-header {

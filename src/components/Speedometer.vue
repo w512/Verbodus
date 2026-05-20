@@ -56,6 +56,34 @@ function getTpotClass(val) {
   if (val < 66) return "stat-good";
   return "stat-slow";
 }
+
+// Multi-run aggregate display (issue #3). When a series of >1 measured runs has
+// completed, each metric card shows the median plus a min–max range; otherwise
+// it shows the live single-run value as before.
+const showAgg = computed(
+  () => store.series.status === "completed" && store.series.kept > 1 && !!store.series.agg
+);
+
+function metricView(metric, liveVal, unit) {
+  const fmt = unit === "tps" ? (v) => v.toFixed(2) : (v) => Math.round(v);
+  const stat = showAgg.value ? store.series.agg?.[metric] : null;
+  if (stat) {
+    return {
+      value: `${fmt(stat.median)} ${unit}`,
+      sub: `median · ${fmt(stat.min)}–${fmt(stat.max)} ${unit}`,
+      classVal: stat.median,
+    };
+  }
+  return {
+    value: liveVal ? `${liveVal} ${unit}` : "--",
+    sub: null,
+    classVal: liveVal,
+  };
+}
+
+const ttftView = computed(() => metricView("ttft", store.activeRun.ttft, "ms"));
+const tpotView = computed(() => metricView("tpot", store.activeRun.tpot, "ms"));
+const tpsView = computed(() => metricView("tps", store.activeRun.tps, "tps"));
 </script>
 
 <template>
@@ -67,22 +95,31 @@ function getTpotClass(val) {
           <h2>⚡ Performance Playground</h2>
           <p class="model-badge">Active Engine: <span>{{ store.config.model }}</span> ({{ store.config.url }})</p>
         </div>
-        <button
-          v-if="store.activeRun.status !== 'running'"
-          class="btn btn-primary"
-          :disabled="!promptText.trim()"
-          @click="startTest"
-        >
-          Run Verbodus
-        </button>
-        <button
-          v-else
-          class="btn btn-danger"
-          @click="cancelBenchmark"
-        >
-          <span class="spinner"></span>
-          Cancel
-        </button>
+        <div class="header-actions">
+          <span
+            v-if="store.series.status === 'running' && store.series.total > 1"
+            class="series-progress"
+          >
+            Run {{ store.series.current }}/{{ store.series.total }}
+            <span v-if="store.series.current <= store.series.warmup" class="warmup-tag">warm-up</span>
+          </span>
+          <button
+            v-if="store.activeRun.status !== 'running'"
+            class="btn btn-primary"
+            :disabled="!promptText.trim()"
+            @click="startTest"
+          >
+            {{ store.config.iterations > 1 ? `Run ×${store.config.iterations}` : 'Run Verbodus' }}
+          </button>
+          <button
+            v-else
+            class="btn btn-danger"
+            @click="cancelBenchmark"
+          >
+            <span class="spinner"></span>
+            Cancel
+          </button>
+        </div>
       </header>
 
       <div class="workbench-grid">
@@ -141,28 +178,28 @@ function getTpotClass(val) {
             <!-- TTFT Card -->
             <div class="metric-card glass-card">
               <span class="metric-label">TTFT (Prefill Latency)</span>
-              <span class="metric-val" :class="getTtftClass(store.activeRun.ttft)">
-                {{ store.activeRun.ttft ? `${store.activeRun.ttft} ms` : '--' }}
+              <span class="metric-val" :class="getTtftClass(ttftView.classVal)">
+                {{ ttftView.value }}
               </span>
-              <span class="metric-desc">Time to first token</span>
+              <span class="metric-desc">{{ ttftView.sub || 'Time to first token' }}</span>
             </div>
 
             <!-- TPOT Card -->
             <div class="metric-card glass-card">
               <span class="metric-label">TPOT (Decode Latency)</span>
-              <span class="metric-val" :class="getTpotClass(store.activeRun.tpot)">
-                {{ store.activeRun.tpot ? `${store.activeRun.tpot} ms` : '--' }}
+              <span class="metric-val" :class="getTpotClass(tpotView.classVal)">
+                {{ tpotView.value }}
               </span>
-              <span class="metric-desc">Time per output token</span>
+              <span class="metric-desc">{{ tpotView.sub || 'Time per output token' }}</span>
             </div>
 
             <!-- TPS Card -->
             <div class="metric-card glass-card">
               <span class="metric-label">Generation Speed</span>
-              <span class="metric-val" :class="getTpsClass(store.activeRun.tps)">
-                {{ store.activeRun.tps ? `${store.activeRun.tps} tps` : '--' }}
+              <span class="metric-val" :class="getTpsClass(tpsView.classVal)">
+                {{ tpsView.value }}
               </span>
-              <span class="metric-desc">Tokens per second</span>
+              <span class="metric-desc">{{ tpsView.sub || 'Tokens per second' }}</span>
             </div>
 
             <!-- Token Counts -->
@@ -235,6 +272,34 @@ function getTpotClass(val) {
 .model-badge span {
   color: var(--accent-cyan);
   font-weight: 600;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.series-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.warmup-tag {
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid rgba(245, 158, 11, 0.2);
 }
 
 .workbench-grid {
