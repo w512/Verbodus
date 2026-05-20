@@ -18,6 +18,10 @@ const STALL_TIMEOUT_MS = 60000;
 let activeController = null;
 let abortKind = null; // 'user' | 'timeout' | null
 
+// History caps to keep localStorage from overflowing its ~5 MB quota (issue #8).
+const MAX_RUNS = 50;          // newest runs kept in history
+const MAX_CURVE_POINTS = 80;  // throughput-curve points stored per run
+
 // Default configuration presets
 const DEFAULT_PRESETS = [
   {
@@ -175,18 +179,22 @@ export const store = reactive({
   },
 
   saveRun(run) {
+    // Downsample the throughput curve before storing — the live chart uses
+    // activeRun, so the per-token history copy is only dead weight (issue #8).
+    if (run.streamDataPoints) run.streamDataPoints = downsampleCurve(run.streamDataPoints);
     this.runs.unshift(run);
-    localStorage.setItem("speedometer_runs", JSON.stringify(this.runs));
+    if (this.runs.length > MAX_RUNS) this.runs.length = MAX_RUNS;
+    persistRuns();
   },
 
   deleteRun(id) {
     this.runs = this.runs.filter(r => r.id !== id);
-    localStorage.setItem("speedometer_runs", JSON.stringify(this.runs));
+    persistRuns();
   },
 
   clearRuns() {
     this.runs = [];
-    localStorage.setItem("speedometer_runs", JSON.stringify([]));
+    persistRuns();
   },
 
   resetActiveRun() {
@@ -210,6 +218,45 @@ export const store = reactive({
 function persistProfiles() {
   const sanitized = store.profiles.map(({ apiKey, ...rest }) => rest);
   localStorage.setItem("speedometer_profiles", JSON.stringify(sanitized));
+}
+
+// Evenly thins a throughput curve down to MAX_CURVE_POINTS, always keeping the
+// last point so the tail of the curve is preserved (issue #8).
+function downsampleCurve(points) {
+  if (!Array.isArray(points) || points.length <= MAX_CURVE_POINTS) return points || [];
+  const step = points.length / MAX_CURVE_POINTS;
+  const out = [];
+  for (let i = 0; i < MAX_CURVE_POINTS; i++) out.push(points[Math.floor(i * step)]);
+  const last = points[points.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
+
+// Persists run history with quota handling: on a QuotaExceededError, drop the
+// oldest half and retry until it fits, rather than throwing and losing data.
+function persistRuns() {
+  if (store.runs.length > MAX_RUNS) store.runs.length = MAX_RUNS;
+  try {
+    localStorage.setItem("speedometer_runs", JSON.stringify(store.runs));
+  } catch (err) {
+    console.error("Failed to persist run history; trimming oldest entries:", err);
+    while (store.runs.length > 1) {
+      store.runs.splice(Math.ceil(store.runs.length / 2)); // drop the older half
+      try {
+        localStorage.setItem("speedometer_runs", JSON.stringify(store.runs));
+        return;
+      } catch {
+        // still too big — keep trimming
+      }
+    }
+    // Last resort: a single run that still won't fit — drop history entirely.
+    try {
+      localStorage.setItem("speedometer_runs", JSON.stringify(store.runs));
+    } catch {
+      store.runs = [];
+      localStorage.removeItem("speedometer_runs");
+    }
+  }
 }
 
 // On startup, reconcile each profile's key with secure storage: migrate any
