@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, nextTick } from "vue";
-import { store, runBenchmark } from "../store/store.js";
+import { store, runBenchmark, cancelBenchmark } from "../store/store.js";
 import ConfigPanel from "./ConfigPanel.vue";
 import SpeedChart from "./SpeedChart.vue";
 
@@ -67,13 +67,21 @@ function getTpotClass(val) {
           <h2>⚡ Performance Playground</h2>
           <p class="model-badge">Active Engine: <span>{{ store.config.model }}</span> ({{ store.config.url }})</p>
         </div>
-        <button 
-          class="btn btn-primary" 
-          :disabled="store.activeRun.status === 'running' || !promptText.trim()"
+        <button
+          v-if="store.activeRun.status !== 'running'"
+          class="btn btn-primary"
+          :disabled="!promptText.trim()"
           @click="startTest"
         >
-          <span v-if="store.activeRun.status === 'running'" class="spinner"></span>
-          {{ store.activeRun.status === 'running' ? 'Benchmarking...' : 'Run Verbodus' }}
+          Run Verbodus
+        </button>
+        <button
+          v-else
+          class="btn btn-danger"
+          @click="cancelBenchmark"
+        >
+          <span class="spinner"></span>
+          Cancel
         </button>
       </header>
 
@@ -110,6 +118,7 @@ function getTpotClass(val) {
               <span class="title">STREAMING OUTPUT</span>
               <span v-if="store.activeRun.status === 'running'" class="status-pill running">GENERATE STREAM</span>
               <span v-else-if="store.activeRun.status === 'completed'" class="status-pill completed">COMPLETED</span>
+              <span v-else-if="store.activeRun.status === 'cancelled'" class="status-pill cancelled">CANCELLED</span>
               <span v-else-if="store.activeRun.status === 'error'" class="status-pill error">ERROR</span>
             </div>
             <div 
@@ -369,6 +378,12 @@ textarea {
   border: 1px solid rgba(239, 68, 68, 0.2);
 }
 
+.status-pill.cancelled {
+  background-color: rgba(156, 163, 175, 0.1);
+  color: var(--text-secondary);
+  border: 1px solid rgba(156, 163, 175, 0.2);
+}
+
 .loading-text {
   color: var(--text-secondary);
   font-style: italic;
@@ -442,6 +457,22 @@ textarea {
   min-height: 0;
   display: flex;
   align-items: center;
+}
+
+/* Cancel button (shown while a benchmark is running) */
+.btn-danger {
+  background: var(--color-danger-bg);
+  border: 1px solid var(--color-danger);
+  color: var(--color-danger);
+}
+
+.btn-danger:hover {
+  filter: brightness(1.2);
+  transform: translateY(-1px);
+}
+
+.btn-danger .spinner {
+  border-top-color: var(--color-danger);
 }
 
 /* Spinner indicator */

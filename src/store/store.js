@@ -1,4 +1,21 @@
-import { reactive, ref, watch } from "vue";
+import { reactive, watch } from "vue";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { isTauri } from "@tauri-apps/api/core";
+
+// Issue #5: route HTTP through the Rust stack when running inside Tauri. This
+// bypasses the WebView's CORS restrictions (so remote OpenAI-compatible APIs
+// actually work) and lets us keep a real CSP. Fall back to the browser fetch
+// for the `bun dev` web-only preview, where the Tauri runtime is absent.
+const httpFetch = isTauri() ? tauriFetch : globalThis.fetch.bind(globalThis);
+
+// Inactivity window: abort a benchmark if no bytes arrive within this many ms.
+// A stall timer (reset on every chunk) is more useful than a fixed total
+// timeout, since legitimate long generations keep streaming.
+const STALL_TIMEOUT_MS = 60000;
+
+// Tracks the in-flight request so it can be cancelled (issue #4).
+let activeController = null;
+let abortKind = null; // 'user' | 'timeout' | null
 
 // Default configuration presets
 const DEFAULT_PRESETS = [
@@ -57,7 +74,7 @@ export const store = reactive({
 
   // Active run telemetry
   activeRun: {
-    status: "idle", // 'idle' | 'running' | 'completed' | 'error'
+    status: "idle", // 'idle' | 'running' | 'completed' | 'error' | 'cancelled'
     prompt: "",
     responseText: "",
     ttft: 0, // ms
@@ -174,11 +191,27 @@ export async function runBenchmark(promptText) {
   let lastTokenTime = null;
   let tokenCount = 0;
 
+  // Set up cancellation + inactivity timeout (issue #4)
+  const controller = new AbortController();
+  activeController = controller;
+  abortKind = null;
+
+  let stallTimer = null;
+  const armStall = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      abortKind = "timeout";
+      controller.abort();
+    }, STALL_TIMEOUT_MS);
+  };
+
   try {
-    const response = await fetch(endpoint, {
+    armStall();
+    const response = await httpFetch(endpoint, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -231,6 +264,7 @@ export async function runBenchmark(promptText) {
       const { done, value } = await reader.read();
       if (done) break;
 
+      armStall(); // bytes arrived — reset the inactivity timer
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop(); // keep last incomplete line
@@ -324,9 +358,30 @@ export async function runBenchmark(promptText) {
     saveActiveRunToHistory();
 
   } catch (err) {
-    store.activeRun.status = "error";
-    store.activeRun.error = err.message;
+    const aborted = abortKind || err.name === "AbortError";
+    if (aborted && abortKind === "user") {
+      // Keep any partial output; this was a deliberate stop, not a failure.
+      store.activeRun.status = "cancelled";
+      store.activeRun.error = "Benchmark cancelled.";
+    } else if (aborted) {
+      store.activeRun.status = "error";
+      store.activeRun.error = `Request timed out after ${STALL_TIMEOUT_MS / 1000}s with no response.`;
+    } else {
+      store.activeRun.status = "error";
+      store.activeRun.error = err.message;
+    }
     console.error("Benchmark error:", err);
+  } finally {
+    clearTimeout(stallTimer);
+    activeController = null;
+  }
+}
+
+// Abort the in-flight benchmark, if any (issue #4).
+export function cancelBenchmark() {
+  if (activeController) {
+    abortKind = "user";
+    activeController.abort();
   }
 }
 
