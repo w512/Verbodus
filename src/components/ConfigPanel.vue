@@ -186,13 +186,22 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
         <h4>SYSTEM PROMPT</h4>
         <div class="form-row">
           <label for="sys-prompt">System Instructions</label>
-          <textarea 
-            id="sys-prompt" 
-            v-model="store.config.systemPrompt" 
-            rows="3" 
+          <textarea
+            id="sys-prompt"
+            v-model="store.config.systemPrompt"
+            rows="3"
             placeholder="Define the behavior of the model..."
           ></textarea>
         </div>
+      </div>
+    </div>
+
+    <!-- Unsaved-changes footer (issue #7) -->
+    <div class="panel-footer" v-if="store.isDirty()">
+      <span class="dirty-note">● Unsaved changes</span>
+      <div class="footer-actions">
+        <button class="btn btn-secondary btn-sm" @click="store.revertActiveProfile()">Revert</button>
+        <button class="btn btn-primary btn-sm" @click="store.saveActiveProfile()">Save to profile</button>
       </div>
     </div>
   </div>
@@ -233,6 +242,35 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
   flex-direction: column;
   gap: 24px;
   min-height: 0;
+}
+
+.panel-footer {
+  flex-shrink: 0;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(245, 158, 11, 0.04);
+}
+
+.dirty-note {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-warning);
+  white-space: nowrap;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 6px;
 }
 
 .settings-group {

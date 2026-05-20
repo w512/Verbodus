@@ -1,6 +1,7 @@
-import { reactive, watch } from "vue";
+import { reactive } from "vue";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { isTauri } from "@tauri-apps/api/core";
+import { getApiKey, setApiKey, deleteApiKey } from "./secrets.js";
 
 // Issue #5: route HTTP through the Rust stack when running inside Tauri. This
 // bypasses the WebView's CORS restrictions (so remote OpenAI-compatible APIs
@@ -136,15 +137,41 @@ export const store = reactive({
     } else {
       this.profiles.push(newProfile);
     }
-    localStorage.setItem("speedometer_profiles", JSON.stringify(this.profiles));
+    persistProfiles();
+    setApiKey(name, this.config.apiKey || ""); // key goes to the vault, not localStorage
+  },
+
+  // Persists the current form edits back into the active profile (issue #7 —
+  // edits no longer auto-overwrite the saved preset; this is the explicit save).
+  saveActiveProfile() {
+    const idx = this.activeProfileIndex;
+    const name = this.profiles[idx].name;
+    this.profiles[idx] = { ...this.config, name };
+    persistProfiles();
+    setApiKey(name, this.config.apiKey || "");
+  },
+
+  // Discards unsaved form edits, restoring the active profile's saved values.
+  revertActiveProfile() {
+    this.config = withBenchDefaults(this.profiles[this.activeProfileIndex]);
+  },
+
+  // True when the form differs from the saved profile (drives the Save/Revert UI).
+  isDirty() {
+    const saved = this.profiles[this.activeProfileIndex];
+    if (!saved) return false;
+    const keys = ["url", "apiKey", "model", "temperature", "maxTokens", "systemPrompt", "stream", "iterations", "warmup"];
+    return keys.some((k) => (this.config[k] ?? "") !== (saved[k] ?? ""));
   },
 
   deleteProfile(index) {
     if (this.profiles.length <= 1) return;
+    const name = this.profiles[index].name;
     this.profiles.splice(index, 1);
     this.activeProfileIndex = Math.min(this.activeProfileIndex, this.profiles.length - 1);
     this.config = withBenchDefaults(this.profiles[this.activeProfileIndex]);
-    localStorage.setItem("speedometer_profiles", JSON.stringify(this.profiles));
+    persistProfiles();
+    deleteApiKey(name);
   },
 
   saveRun(run) {
@@ -178,15 +205,31 @@ export const store = reactive({
   }
 });
 
-// Watch config changes to update the profiles array in memory
-watch(
-  () => store.config,
-  (newVal) => {
-    store.profiles[store.activeProfileIndex] = { ...newVal };
-    localStorage.setItem("speedometer_profiles", JSON.stringify(store.profiles));
-  },
-  { deep: true }
-);
+// Persists profiles to localStorage WITHOUT the apiKey (issue #6 — keys live in
+// the encrypted vault, never in plaintext localStorage).
+function persistProfiles() {
+  const sanitized = store.profiles.map(({ apiKey, ...rest }) => rest);
+  localStorage.setItem("speedometer_profiles", JSON.stringify(sanitized));
+}
+
+// On startup, reconcile each profile's key with secure storage: migrate any
+// legacy plaintext key (from older localStorage) into the vault, otherwise load
+// the key from the vault into memory. Finally strip keys from localStorage.
+async function initSecrets() {
+  for (const profile of store.profiles) {
+    if (profile.apiKey) {
+      await setApiKey(profile.name, profile.apiKey); // migrate legacy plaintext key
+    } else {
+      const key = await getApiKey(profile.name);
+      if (key) profile.apiKey = key;
+    }
+  }
+  const active = store.profiles[store.activeProfileIndex];
+  if (active) store.config.apiKey = active.apiKey || "";
+  persistProfiles(); // ensure no plaintext keys remain in localStorage
+}
+
+initSecrets();
 
 // Builds the OpenAI-compatible chat/completions request from the active config.
 function buildRequest(promptText) {
