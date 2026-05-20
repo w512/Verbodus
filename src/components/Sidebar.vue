@@ -1,5 +1,6 @@
 <script setup>
 import { store } from "../store/store.js";
+import { confirmDialog } from "../store/dialog.js";
 import { ref } from "vue";
 
 const newProfileName = ref("");
@@ -22,9 +23,15 @@ function cancelCreate() {
   isCreating.value = false;
 }
 
-function removeProfile(index, event) {
+async function removeProfile(index, event) {
   event.stopPropagation();
-  if (confirm("Are you sure you want to delete this profile?")) {
+  const ok = await confirmDialog({
+    title: "Delete profile",
+    message: `Delete the profile "${store.profiles[index].name}"?`,
+    confirmText: "Delete",
+    danger: true,
+  });
+  if (ok) {
     store.deleteProfile(index);
   }
 }

@@ -3,6 +3,7 @@ import { store } from "./store/store.js";
 import Sidebar from "./components/Sidebar.vue";
 import Speedometer from "./components/Speedometer.vue";
 import Comparison from "./components/Comparison.vue";
+import ModalDialog from "./components/ModalDialog.vue";
 </script>
 
 <template>
@@ -16,6 +17,9 @@ import Comparison from "./components/Comparison.vue";
         <component :is="store.currentView === 'playground' ? Speedometer : Comparison" />
       </KeepAlive>
     </main>
+
+    <!-- Global confirmation / alert modal -->
+    <ModalDialog />
   </div>
 </template>
 

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { store } from "../store/store.js";
+import { confirmDialog, alertDialog } from "../store/dialog.js";
 import {
   Chart,
   BarController,
@@ -43,7 +44,10 @@ function toggleSelection(id) {
   } else {
     // Limit to comparing 4 runs simultaneously to avoid chart clutter
     if (selectedRunIds.value.length >= 4) {
-      alert("You can compare a maximum of 4 runs simultaneously.");
+      alertDialog({
+        title: "Comparison limit",
+        message: "You can compare a maximum of 4 runs simultaneously.",
+      });
       return;
     }
     selectedRunIds.value.push(id);
@@ -55,16 +59,28 @@ function formatDate(isoString) {
   return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
-function deleteRun(id, event) {
+async function deleteRun(id, event) {
   event.stopPropagation();
-  if (confirm("Delete this run from history?")) {
+  const ok = await confirmDialog({
+    title: "Delete run",
+    message: "Delete this run from history?",
+    confirmText: "Delete",
+    danger: true,
+  });
+  if (ok) {
     store.deleteRun(id);
     selectedRunIds.value = selectedRunIds.value.filter(runId => runId !== id);
   }
 }
 
-function clearAllHistory() {
-  if (confirm("Are you sure you want to wipe all benchmark history? This cannot be undone.")) {
+async function clearAllHistory() {
+  const ok = await confirmDialog({
+    title: "Clear history",
+    message: "Wipe all benchmark history? This cannot be undone.",
+    confirmText: "Clear history",
+    danger: true,
+  });
+  if (ok) {
     store.clearRuns();
     selectedRunIds.value = [];
   }
