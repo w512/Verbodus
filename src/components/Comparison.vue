@@ -2,24 +2,8 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { store } from "../store/store.js";
 import { confirmDialog, alertDialog } from "../store/dialog.js";
-import {
-  Chart,
-  BarController,
-  BarElement,
-  CategoryScale,
-  LinearScale,
-  Legend,
-  Tooltip
-} from "chart.js";
-
-Chart.register(
-  BarController,
-  BarElement,
-  CategoryScale,
-  LinearScale,
-  Legend,
-  Tooltip
-);
+import { ttftClass, tpotClass, tpsClass, classColor } from "../store/metrics.js";
+import { Chart, CHART_COLORS, CHART_FONT, tooltipTheme } from "../store/chartTheme.js";
 
 const canvasRef = ref(null);
 let chartInstance = null;
@@ -99,7 +83,7 @@ function initChart() {
           label: "TTFT (ms - Lower is Better)",
           data: [],
           backgroundColor: "rgba(99, 102, 241, 0.75)",
-          borderColor: "#6366F1",
+          borderColor: CHART_COLORS.indigo,
           borderWidth: 1,
           yAxisID: "y-ttft"
         },
@@ -107,7 +91,7 @@ function initChart() {
           label: "Avg Speed (TPS - Higher is Better)",
           data: [],
           backgroundColor: "rgba(6, 182, 212, 0.75)",
-          borderColor: "#06B6D4",
+          borderColor: CHART_COLORS.cyan,
           borderWidth: 1,
           yAxisID: "y-tps"
         }
@@ -121,22 +105,16 @@ function initChart() {
           display: true,
           position: "top",
           labels: {
-            color: "#9CA3AF",
-            font: { family: "Inter", size: 11 }
+            color: CHART_COLORS.axisTitle,
+            font: CHART_FONT
           }
         },
-        tooltip: {
-          backgroundColor: "rgba(11, 15, 25, 0.9)",
-          titleColor: "#9CA3AF",
-          bodyColor: "#F3F4F6",
-          borderColor: "rgba(255, 255, 255, 0.08)",
-          borderWidth: 1
-        }
+        tooltip: tooltipTheme
       },
       scales: {
         x: {
-          grid: { color: "rgba(255, 255, 255, 0.03)" },
-          ticks: { color: "#9CA3AF", font: { family: "Inter", size: 10 } }
+          grid: { color: CHART_COLORS.gridFaint },
+          ticks: { color: CHART_COLORS.axisTitle, font: { ...CHART_FONT, size: 10 } }
         },
         "y-ttft": {
           type: "linear",
@@ -144,11 +122,11 @@ function initChart() {
           title: {
             display: true,
             text: "TTFT (ms)",
-            color: "#6366F1",
-            font: { family: "Inter", size: 10 }
+            color: CHART_COLORS.indigo,
+            font: { ...CHART_FONT, size: 10 }
           },
-          grid: { color: "rgba(255, 255, 255, 0.03)" },
-          ticks: { color: "#9CA3AF" },
+          grid: { color: CHART_COLORS.gridFaint },
+          ticks: { color: CHART_COLORS.axisTitle },
           min: 0
         },
         "y-tps": {
@@ -157,11 +135,11 @@ function initChart() {
           title: {
             display: true,
             text: "Throughput (TPS)",
-            color: "#06B6D4",
-            font: { family: "Inter", size: 10 }
+            color: CHART_COLORS.cyan,
+            font: { ...CHART_FONT, size: 10 }
           },
           grid: { drawOnChartArea: false }, // avoid duplicate horizontal gridlines
-          ticks: { color: "#9CA3AF" },
+          ticks: { color: CHART_COLORS.axisTitle },
           min: 0
         }
       }
@@ -244,8 +222,8 @@ onBeforeUnmount(() => {
                   <span v-if="run.iterations > 1" class="runs-tag">×{{ run.iterations }} median</span>
                 </div>
                 <div class="run-stats">
-                  <span>Speed: <strong>{{ run.tps }} tps</strong></span>
-                  <span>TTFT: <strong>{{ run.ttft != null ? `${run.ttft} ms` : 'N/A' }}</strong></span>
+                  <span>Speed: <strong :style="{ color: classColor(tpsClass(run.tps)) }">{{ run.tps }} tps</strong></span>
+                  <span>TTFT: <strong :style="{ color: classColor(ttftClass(run.ttft)) }">{{ run.ttft != null ? `${run.ttft} ms` : 'N/A' }}</strong></span>
                   <span>Tokens: <strong>{{ run.tokenCount }}</strong></span>
                 </div>
                 <div class="run-date">{{ formatDate(run.timestamp) }}</div>
@@ -287,15 +265,15 @@ onBeforeUnmount(() => {
               <div class="detail-body">
                 <div class="detail-metric">
                   <span>TTFT:</span>
-                  <strong>{{ run.ttft != null ? `${run.ttft} ms` : 'N/A' }}</strong>
+                  <strong :style="{ color: classColor(ttftClass(run.ttft)) }">{{ run.ttft != null ? `${run.ttft} ms` : 'N/A' }}</strong>
                 </div>
                 <div class="detail-metric">
                   <span>TPOT:</span>
-                  <strong>{{ run.tpot != null ? `${run.tpot} ms` : 'N/A' }}</strong>
+                  <strong :style="{ color: classColor(tpotClass(run.tpot)) }">{{ run.tpot != null ? `${run.tpot} ms` : 'N/A' }}</strong>
                 </div>
                 <div class="detail-metric">
                   <span>Speed:</span>
-                  <strong>{{ run.tps }} tps</strong>
+                  <strong :style="{ color: classColor(tpsClass(run.tps)) }">{{ run.tps }} tps</strong>
                 </div>
                 <div class="detail-metric">
                   <span>Tokens:</span>

@@ -1,25 +1,6 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
-import {
-  Chart,
-  LineController,
-  LineElement,
-  PointElement,
-  LinearScale,
-  CategoryScale,
-  Tooltip,
-  Filler
-} from "chart.js";
-
-Chart.register(
-  LineController,
-  LineElement,
-  PointElement,
-  LinearScale,
-  CategoryScale,
-  Tooltip,
-  Filler
-);
+import { Chart, CHART_COLORS, CHART_FONT, tooltipTheme } from "../store/chartTheme.js";
 
 const props = defineProps({
   dataPoints: {
@@ -37,8 +18,8 @@ function initChart() {
   
   // Create gradient stroke
   const gradient = ctx.createLinearGradient(0, 0, canvasRef.value.width, 0);
-  gradient.addColorStop(0, "#6366F1"); // Indigo
-  gradient.addColorStop(1, "#06B6D4"); // Cyan
+  gradient.addColorStop(0, CHART_COLORS.indigo);
+  gradient.addColorStop(1, CHART_COLORS.cyan);
 
   // Create gradient fill
   const fillGradient = ctx.createLinearGradient(0, 0, 0, 300);
@@ -59,7 +40,7 @@ function initChart() {
           borderWidth: 2,
           pointRadius: 0,
           pointHoverRadius: 4,
-          pointBackgroundColor: "#06B6D4",
+          pointBackgroundColor: CHART_COLORS.cyan,
           tension: 0.35,
         }
       ]
@@ -73,12 +54,7 @@ function initChart() {
           display: false
         },
         tooltip: {
-          backgroundColor: "rgba(11, 15, 25, 0.9)",
-          titleColor: "#9CA3AF",
-          bodyColor: "#F3F4F6",
-          borderColor: "rgba(255,255,255,0.08)",
-          borderWidth: 1,
-          displayColors: false,
+          ...tooltipTheme,
           callbacks: {
             title: (context) => `Time: ${context[0].label}s`,
             label: (context) => `Speed: ${context.parsed.y} tps`
@@ -91,17 +67,14 @@ function initChart() {
           title: {
             display: true,
             text: "Elapsed Time (Seconds)",
-            color: "#9CA3AF",
-            font: {
-              family: "Inter",
-              size: 11
-            }
+            color: CHART_COLORS.axisTitle,
+            font: CHART_FONT
           },
           grid: {
-            color: "rgba(255, 255, 255, 0.04)"
+            color: CHART_COLORS.grid
           },
           ticks: {
-            color: "#6B7280",
+            color: CHART_COLORS.tick,
             callback: (val) => `${parseFloat(val).toFixed(1)}s`
           }
         },
@@ -109,17 +82,14 @@ function initChart() {
           title: {
             display: true,
             text: "Tokens Per Second",
-            color: "#9CA3AF",
-            font: {
-              family: "Inter",
-              size: 11
-            }
+            color: CHART_COLORS.axisTitle,
+            font: CHART_FONT
           },
           grid: {
-            color: "rgba(255, 255, 255, 0.04)"
+            color: CHART_COLORS.grid
           },
           ticks: {
-            color: "#6B7280"
+            color: CHART_COLORS.tick
           },
           min: 0,
           suggestedMax: 50

@@ -180,6 +180,26 @@ label {
   border-color: var(--text-secondary);
 }
 
+/* Performance color bands (see src/store/metrics.js for the thresholds) */
+.stat-excellent {
+  color: var(--color-success);
+  text-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+}
+
+.stat-good {
+  color: var(--color-warning);
+  text-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+}
+
+.stat-slow {
+  color: var(--color-danger);
+  text-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
+}
+
+.stat-normal {
+  color: var(--text-primary);
+}
+
 /* Animations */
 @keyframes pulse-glow {
   0%, 100% {

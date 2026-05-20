@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch, nextTick } from "vue";
 import { store, runBenchmark, cancelBenchmark } from "../store/store.js";
+import { ttftClass, tpotClass, tpsClass } from "../store/metrics.js";
 import ConfigPanel from "./ConfigPanel.vue";
 import SpeedChart from "./SpeedChart.vue";
 
@@ -35,27 +36,8 @@ watch(
   }
 );
 
-// Performance color-coding helper functions
-function getTtftClass(val) {
-  if (!val) return "";
-  if (val < 250) return "stat-excellent";
-  if (val < 800) return "stat-good";
-  return "stat-slow";
-}
-
-function getTpsClass(val) {
-  if (!val) return "";
-  if (val > 45) return "stat-excellent";
-  if (val > 15) return "stat-good";
-  return "stat-slow";
-}
-
-function getTpotClass(val) {
-  if (!val) return "";
-  if (val < 22) return "stat-excellent";
-  if (val < 66) return "stat-good";
-  return "stat-slow";
-}
+// Performance color bands come from the shared src/store/metrics.js helpers
+// (ttftClass / tpotClass / tpsClass), imported above.
 
 // Multi-run aggregate display (issue #3). When a series of >1 measured runs has
 // completed, each metric card shows the median plus a min–max range; otherwise
@@ -178,7 +160,7 @@ const tpsView = computed(() => metricView("tps", store.activeRun.tps, "tps"));
             <!-- TTFT Card -->
             <div class="metric-card glass-card">
               <span class="metric-label">TTFT (Prefill Latency)</span>
-              <span class="metric-val" :class="getTtftClass(ttftView.classVal)">
+              <span class="metric-val" :class="ttftClass(ttftView.classVal)">
                 {{ ttftView.value }}
               </span>
               <span class="metric-desc">{{ ttftView.sub || 'Time to first token' }}</span>
@@ -187,7 +169,7 @@ const tpsView = computed(() => metricView("tps", store.activeRun.tps, "tps"));
             <!-- TPOT Card -->
             <div class="metric-card glass-card">
               <span class="metric-label">TPOT (Decode Latency)</span>
-              <span class="metric-val" :class="getTpotClass(tpotView.classVal)">
+              <span class="metric-val" :class="tpotClass(tpotView.classVal)">
                 {{ tpotView.value }}
               </span>
               <span class="metric-desc">{{ tpotView.sub || 'Time per output token' }}</span>
@@ -196,7 +178,7 @@ const tpsView = computed(() => metricView("tps", store.activeRun.tps, "tps"));
             <!-- TPS Card -->
             <div class="metric-card glass-card">
               <span class="metric-label">Generation Speed</span>
-              <span class="metric-val" :class="getTpsClass(tpsView.classVal)">
+              <span class="metric-val" :class="tpsClass(tpsView.classVal)">
                 {{ tpsView.value }}
               </span>
               <span class="metric-desc">{{ tpsView.sub || 'Tokens per second' }}</span>
@@ -491,25 +473,8 @@ textarea {
   color: var(--text-secondary);
 }
 
-/* Stat color code classes */
-.stat-excellent {
-  color: var(--color-success);
-  text-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
-}
-
-.stat-good {
-  color: var(--color-warning);
-  text-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
-}
-
-.stat-slow {
-  color: var(--color-danger);
-  text-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
-}
-
-.stat-normal {
-  color: var(--text-primary);
-}
+/* Stat color bands (.stat-excellent/.stat-good/.stat-slow/.stat-normal) are
+   defined globally in index.css and shared with Comparison.vue. */
 
 /* Chart Container styling */
 .chart-card-container {
