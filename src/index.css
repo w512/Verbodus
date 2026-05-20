@@ -7,10 +7,19 @@
   --bg-sidebar: rgba(11, 15, 25, 0.85);
   --border-color: rgba(255, 255, 255, 0.05);
   --border-color-hover: rgba(99, 102, 241, 0.3);
-  
+
   --text-primary: #F3F4F6;
   --text-secondary: #9CA3AF;
   --text-muted: #6B7280;
+
+  /* Semantic surfaces (theme-aware overlays — replace scattered rgba literals) */
+  --surface-1: rgba(255, 255, 255, 0.02); /* faint raised */
+  --surface-2: rgba(255, 255, 255, 0.04); /* hover / medium */
+  --surface-3: rgba(255, 255, 255, 0.05); /* stronger */
+  --surface-strong: rgba(255, 255, 255, 0.08);
+  --inset-bg: rgba(0, 0, 0, 0.2);          /* recessed areas (response box) */
+  --track-bg: rgba(255, 255, 255, 0.1);    /* slider/scrollbar tracks */
+  --popover-bg: #131a2b;                   /* solid dropdown/menu background */
 
   /* Accent Gradients & Glows */
   --accent-indigo: #6366F1;
@@ -28,6 +37,33 @@
   --color-danger-bg: rgba(239, 68, 68, 0.1);
 
   color-scheme: dark;
+}
+
+/* Light theme — overrides applied when <html data-theme="light"> */
+:root[data-theme="light"] {
+  --bg-main: #EEF2F7;
+  --bg-card: rgba(255, 255, 255, 0.75);
+  --bg-card-hover: rgba(255, 255, 255, 0.95);
+  --bg-sidebar: rgba(255, 255, 255, 0.85);
+  --border-color: rgba(15, 23, 42, 0.1);
+  --border-color-hover: rgba(99, 102, 241, 0.4);
+
+  --text-primary: #1E293B;
+  --text-secondary: #475569;
+  --text-muted: #94A3B8;
+
+  --surface-1: rgba(15, 23, 42, 0.03);
+  --surface-2: rgba(15, 23, 42, 0.05);
+  --surface-3: rgba(15, 23, 42, 0.07);
+  --surface-strong: rgba(15, 23, 42, 0.11);
+  --inset-bg: rgba(15, 23, 42, 0.04);
+  --track-bg: rgba(15, 23, 42, 0.12);
+  --popover-bg: #FFFFFF;
+
+  --glow-shadow: 0 0 15px rgba(99, 102, 241, 0.15);
+  --glow-shadow-active: 0 0 25px rgba(6, 182, 212, 0.25);
+
+  color-scheme: light;
 }
 
 /* Global Reset */
@@ -55,7 +91,7 @@ body {
 /* Scrollbars */
 .scroller {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  scrollbar-color: var(--track-bg) transparent;
 }
 
 @supports not (scrollbar-color: auto) {
@@ -64,7 +100,7 @@ body {
     height: 6px;
   }
   .scroller::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--track-bg);
     border-radius: 3px;
   }
   .scroller::-webkit-scrollbar-track {
@@ -82,14 +118,14 @@ body {
 }
 
 .glass-card {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-1);
   border: 1px solid var(--border-color);
   border-radius: 12px;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .glass-card:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-2);
   border-color: var(--border-color-hover);
   box-shadow: var(--glow-shadow);
   transform: translateY(-2px);
@@ -111,7 +147,7 @@ code, pre {
 input, select, textarea {
   width: 100%;
   padding: 10px 14px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-2);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   color: var(--text-primary);
@@ -124,7 +160,7 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus {
   border-color: var(--accent-indigo);
   box-shadow: var(--glow-shadow);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-3);
 }
 
 label {
@@ -170,13 +206,13 @@ label {
 }
 
 .btn-secondary {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-3);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
 }
 
 .btn-secondary:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-strong);
   border-color: var(--text-secondary);
 }
 

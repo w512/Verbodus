@@ -369,7 +369,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-1);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   cursor: pointer;
@@ -378,7 +378,7 @@ onBeforeUnmount(() => {
 }
 
 .run-row:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-2);
   border-color: var(--border-color-hover);
 }
 
@@ -439,7 +439,7 @@ onBeforeUnmount(() => {
 
 .profile-tag {
   font-size: 10px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-3);
   padding: 2px 6px;
   border-radius: 4px;
   color: var(--text-secondary);
@@ -548,7 +548,7 @@ onBeforeUnmount(() => {
 .detail-card {
   padding: 14px 16px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.01);
+  background: var(--surface-1);
 }
 
 .detail-header {

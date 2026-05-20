@@ -35,10 +35,12 @@ export { Chart };
 export const CHART_COLORS = {
   indigo: "#6366F1",
   cyan: "#06B6D4",
+  // Neutral greys so axis text and gridlines read on both light and dark
+  // backgrounds (charts pick up these JS colors at init, not CSS vars).
   axisTitle: "#9CA3AF",
-  tick: "#6B7280",
-  grid: "rgba(255, 255, 255, 0.04)",
-  gridFaint: "rgba(255, 255, 255, 0.03)",
+  tick: "#94A3B8",
+  grid: "rgba(148, 163, 184, 0.18)",
+  gridFaint: "rgba(148, 163, 184, 0.12)",
 };
 
 export const CHART_FONT = { family: "Inter", size: 11 };

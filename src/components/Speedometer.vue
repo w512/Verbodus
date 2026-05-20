@@ -360,7 +360,7 @@ textarea {
 
 .response-box {
   flex: 1;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--inset-bg);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 16px;

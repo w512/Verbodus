@@ -1,6 +1,7 @@
 <script setup>
 import { store } from "../store/store.js";
 import { confirmDialog } from "../store/dialog.js";
+import { theme, toggleTheme } from "../store/theme.js";
 import { ref } from "vue";
 
 const newProfileName = ref("");
@@ -101,6 +102,11 @@ async function removeProfile(index, event) {
     </div>
 
     <div class="footer">
+      <button class="theme-toggle" @click="toggleTheme" :title="`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`">
+        <span class="theme-icon">{{ theme === 'dark' ? '🌙' : '☀️' }}</span>
+        <span>{{ theme === 'dark' ? 'Dark' : 'Light' }} theme</span>
+        <span class="theme-hint">Switch</span>
+      </button>
       <p class="status-indicator">
         <span class="dot pulse"></span> Web Engine: Native Safari WebView
       </p>
@@ -170,14 +176,14 @@ async function removeProfile(index, event) {
 }
 
 .nav-btn:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-2);
   color: var(--text-primary);
 }
 
 .nav-btn.active {
-  background: rgba(99, 102, 241, 0.1);
-  border-color: rgba(99, 102, 241, 0.2);
-  color: #fff;
+  background: rgba(99, 102, 241, 0.18);
+  border-color: rgba(99, 102, 241, 0.35);
+  color: var(--text-primary);
   box-shadow: 0 4px 20px rgba(99, 102, 241, 0.05);
 }
 
@@ -214,7 +220,7 @@ async function removeProfile(index, event) {
 }
 
 .profile-creator {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-1);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 8px;
@@ -261,12 +267,12 @@ async function removeProfile(index, event) {
 }
 
 .profiles-list li:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-1);
   color: var(--text-primary);
 }
 
 .profiles-list li.active {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-2);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
 }
@@ -300,6 +306,43 @@ async function removeProfile(index, event) {
 .footer {
   padding-top: 16px;
   border-top: 1px solid var(--border-color);
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.theme-toggle:hover {
+  background: var(--surface-2);
+  border-color: var(--border-color-hover);
+  color: var(--text-primary);
+}
+
+.theme-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.theme-hint {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
 }
 
 .status-indicator {

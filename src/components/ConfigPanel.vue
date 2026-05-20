@@ -343,7 +343,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
   max-height: 220px;
   overflow-y: auto;
   list-style: none;
-  background: #131a2b;
+  background: var(--popover-bg);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -363,13 +363,13 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
 }
 
 .model-dropdown li:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-3);
   color: var(--text-primary);
 }
 
 .model-dropdown li.active {
-  background: rgba(99, 102, 241, 0.15);
-  color: #fff;
+  background: rgba(99, 102, 241, 0.2);
+  color: var(--text-primary);
 }
 
 .model-status {
@@ -429,7 +429,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
   width: 100%;
   height: 6px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--track-bg);
   outline: none;
   padding: 0;
   cursor: pointer;
@@ -474,7 +474,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: var(--track-bg);
   transition: .3s;
   border-radius: 24px;
   border: 1px solid var(--border-color);
