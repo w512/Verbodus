@@ -110,10 +110,22 @@ export const store = reactive({
     agg: null,        // { ttft, tpot, tps } each { median, min, max } | null
   },
 
+  // Models advertised by the active endpoint's GET /models (OpenAI-compatible).
+  models: {
+    status: "idle", // 'idle' | 'loading' | 'loaded' | 'error'
+    list: [],       // array of model id strings
+    error: "",
+  },
+
   // Actions
   selectProfile(index) {
     this.activeProfileIndex = index;
     this.config = withBenchDefaults(this.profiles[index]);
+    // Model list is endpoint-specific — drop it so it isn't shown for a
+    // profile pointing at a different server.
+    this.models.list = [];
+    this.models.status = "idle";
+    this.models.error = "";
   },
 
   saveProfile(name) {
@@ -467,6 +479,41 @@ export function cancelBenchmark() {
   if (activeController) {
     abortKind = "user";
     activeController.abort();
+  }
+}
+
+// Fetches the model catalogue from the active endpoint's GET /models
+// (OpenAI-compatible: Ollama, LM Studio, vLLM, cloud APIs all expose it).
+export async function fetchModels() {
+  store.models.status = "loading";
+  store.models.error = "";
+  store.models.list = [];
+
+  const url = store.config.url.trim().replace(/\/$/, "");
+  const headers = {};
+  if (store.config.apiKey) {
+    headers["Authorization"] = `Bearer ${store.config.apiKey}`;
+  }
+
+  try {
+    const response = await httpFetch(`${url}/models`, { method: "GET", headers });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errText || response.statusText}`);
+    }
+    const data = await response.json();
+    // OpenAI shape is { data: [{ id }] }; fall back to a bare array just in case.
+    const raw = Array.isArray(data) ? data : data?.data || [];
+    const ids = raw
+      .map((m) => (typeof m === "string" ? m : m?.id))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    store.models.list = ids;
+    store.models.status = "loaded";
+  } catch (err) {
+    store.models.status = "error";
+    store.models.error = err.message;
+    console.error("Failed to fetch models:", err);
   }
 }
 

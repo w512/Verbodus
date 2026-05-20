@@ -1,5 +1,41 @@
 <script setup>
-import { store } from "../store/store.js";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { store, fetchModels } from "../store/store.js";
+
+const modelOpen = ref(false);
+const modelWrap = ref(null);
+
+// Filter the fetched catalogue by whatever is currently typed (combobox).
+const filteredModels = computed(() => {
+  const q = (store.config.model || "").toLowerCase().trim();
+  if (!q) return store.models.list;
+  return store.models.list.filter((m) => m.toLowerCase().includes(q));
+});
+
+async function loadModels() {
+  await fetchModels();
+  if (store.models.status === "loaded" && store.models.list.length) {
+    modelOpen.value = true;
+  }
+}
+
+function selectModel(m) {
+  store.config.model = m;
+  modelOpen.value = false;
+}
+
+function onModelFocus() {
+  if (store.models.list.length) modelOpen.value = true;
+}
+
+function handleClickOutside(e) {
+  if (modelWrap.value && !modelWrap.value.contains(e.target)) {
+    modelOpen.value = false;
+  }
+}
+
+onMounted(() => document.addEventListener("mousedown", handleClickOutside));
+onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutside));
 </script>
 
 <template>
@@ -36,12 +72,49 @@ import { store } from "../store/store.js";
 
         <div class="form-row">
           <label for="api-model">Model Name / ID</label>
-          <input 
-            id="api-model" 
-            v-model="store.config.model" 
-            type="text" 
-            placeholder="e.g. llama3, mixtral" 
-          />
+          <div class="model-combobox" ref="modelWrap">
+            <input
+              id="api-model"
+              v-model="store.config.model"
+              type="text"
+              placeholder="e.g. llama3, mixtral"
+              autocomplete="off"
+              @focus="onModelFocus"
+            />
+            <button
+              class="model-fetch-btn"
+              type="button"
+              :disabled="store.models.status === 'loading'"
+              title="Fetch available models from the endpoint"
+              @click="loadModels"
+            >
+              <span v-if="store.models.status === 'loading'" class="spinner-sm"></span>
+              <span v-else>↻</span>
+            </button>
+
+            <ul
+              v-if="modelOpen && filteredModels.length"
+              class="model-dropdown scroller"
+            >
+              <li
+                v-for="m in filteredModels"
+                :key="m"
+                :class="{ active: m === store.config.model }"
+                @mousedown.prevent="selectModel(m)"
+              >
+                {{ m }}
+              </li>
+            </ul>
+          </div>
+          <p v-if="store.models.status === 'error'" class="model-status err">
+            {{ store.models.error }}
+          </p>
+          <p
+            v-else-if="store.models.status === 'loaded'"
+            class="model-status"
+          >
+            {{ store.models.list.length }} model(s) available — type to filter or pick from the list.
+          </p>
         </div>
       </div>
 
@@ -185,6 +258,104 @@ import { store } from "../store/store.js";
 .form-row {
   display: flex;
   flex-direction: column;
+}
+
+/* Model combobox (type or pick from fetched catalogue) */
+.model-combobox {
+  position: relative;
+}
+
+.model-combobox input {
+  padding-right: 38px; /* room for the fetch button */
+}
+
+.model-fetch-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 0 8px 8px 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.model-fetch-btn:hover:not(:disabled) {
+  color: var(--accent-cyan);
+}
+
+.model-fetch-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.model-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 220px;
+  overflow-y: auto;
+  list-style: none;
+  background: #131a2b;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+}
+
+.model-dropdown li {
+  padding: 8px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s, color 0.15s;
+}
+
+.model-dropdown li:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.model-dropdown li.active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #fff;
+}
+
+.model-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.model-status.err {
+  color: var(--color-danger);
+}
+
+.spinner-sm {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--accent-cyan);
+  border-radius: 50%;
+  animation: spin-sm 0.8s linear infinite;
+}
+
+@keyframes spin-sm {
+  to { transform: rotate(360deg); }
 }
 
 .flex-row {
