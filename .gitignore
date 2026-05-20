@@ -13,7 +13,7 @@ dist-ssr
 *.local
 
 # Editor directories and files
-.vscode/*
+.vscode/
 !.vscode/extensions.json
 .idea
 .DS_Store
@@ -29,3 +29,6 @@ AGENTS.md
 .claude/
 docs/
 build-mac.sh
+
+# Signing secrets
+.env.signing

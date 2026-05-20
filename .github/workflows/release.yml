@@ -67,6 +67,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.event.inputs.release_version != '' && format('v{0}', github.event.inputs.release_version) || 'v__VERSION__' }}
-          releaseName: ${{ github.event.inputs.release_version != '' && format('Texodus v{0}', github.event.inputs.release_version) || 'Texodus v__VERSION__' }}
+          releaseName: ${{ github.event.inputs.release_version != '' && format('Verbodus v{0}', github.event.inputs.release_version) || 'Verbodus v__VERSION__' }}
           releaseDraft: ${{ github.event.inputs.draft }}
           prerelease: false
