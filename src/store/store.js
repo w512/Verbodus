@@ -203,10 +203,13 @@ export async function runBenchmark(promptText) {
       store.activeRun.promptTokens = promptTokens;
       store.activeRun.completionTokens = compTokens;
       store.activeRun.totalTokens = promptTokens + compTokens;
-      
-      // For non-streaming, prefill and decoding are combined
-      store.activeRun.ttft = Math.round(totalTime * 0.4); // Estimated TTFT
-      store.activeRun.tpot = Math.round((totalTime * 0.6) / compTokens);
+
+      // TTFT and TPOT cannot be measured without streaming — the response
+      // arrives as a single blob, so prefill and decode are indistinguishable.
+      // Report them as unavailable (null -> "--") rather than fabricating a split.
+      store.activeRun.ttft = null;
+      store.activeRun.tpot = null;
+      // Aggregate throughput over the whole request is still meaningful
       store.activeRun.tps = parseFloat((compTokens / (totalTime / 1000)).toFixed(2));
       store.activeRun.streamDataPoints = [
         { time: 0, tps: 0 },
@@ -291,12 +294,18 @@ export async function runBenchmark(promptText) {
 
     // Done reading stream
     const finalTime = performance.now();
-    
-    // Finalize TTFT / TPOT
-    if (firstTokenTime !== null && lastTokenTime !== null && tokenCount > 0) {
-      store.activeRun.tpot = Math.round((lastTokenTime - firstTokenTime) / tokenCount);
+
+    // Prefer the server-reported completion token count for accuracy.
+    // The chunk count (tokenCount) is only a fallback: one SSE chunk is not
+    // guaranteed to equal one token, so it would skew TPS/TPOT.
+    const usageTokens = store.activeRun.completionTokens || 0;
+    const tokensForMetrics = usageTokens > 0 ? usageTokens : tokenCount;
+
+    // Finalize TTFT / TPOT / TPS using the most accurate token count available
+    if (firstTokenTime !== null && lastTokenTime !== null && tokensForMetrics > 0) {
+      store.activeRun.tpot = Math.round((lastTokenTime - firstTokenTime) / tokensForMetrics);
       const totalTimeSecs = (finalTime - firstTokenTime) / 1000;
-      store.activeRun.tps = parseFloat((tokenCount / (totalTimeSecs || 0.001)).toFixed(2));
+      store.activeRun.tps = parseFloat((tokensForMetrics / (totalTimeSecs || 0.001)).toFixed(2));
     }
 
     // Default calculations if usage stats not provided
@@ -306,6 +315,8 @@ export async function runBenchmark(promptText) {
     if (!store.activeRun.completionTokens) {
       store.activeRun.completionTokens = tokenCount;
     }
+    // Keep the audited token count consistent with the metrics source
+    store.activeRun.tokenCount = tokensForMetrics;
     store.activeRun.totalTokens = store.activeRun.promptTokens + store.activeRun.completionTokens;
     store.activeRun.status = "completed";
 

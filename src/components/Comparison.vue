@@ -228,7 +228,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="run-stats">
                   <span>Speed: <strong>{{ run.tps }} tps</strong></span>
-                  <span>TTFT: <strong>{{ run.ttft }} ms</strong></span>
+                  <span>TTFT: <strong>{{ run.ttft != null ? `${run.ttft} ms` : 'N/A' }}</strong></span>
                   <span>Tokens: <strong>{{ run.tokenCount }}</strong></span>
                 </div>
                 <div class="run-date">{{ formatDate(run.timestamp) }}</div>
@@ -270,11 +270,11 @@ onBeforeUnmount(() => {
               <div class="detail-body">
                 <div class="detail-metric">
                   <span>TTFT:</span>
-                  <strong>{{ run.ttft }} ms</strong>
+                  <strong>{{ run.ttft != null ? `${run.ttft} ms` : 'N/A' }}</strong>
                 </div>
                 <div class="detail-metric">
                   <span>TPOT:</span>
-                  <strong>{{ run.tpot }} ms</strong>
+                  <strong>{{ run.tpot != null ? `${run.tpot} ms` : 'N/A' }}</strong>
                 </div>
                 <div class="detail-metric">
                   <span>Speed:</span>
