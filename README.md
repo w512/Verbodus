@@ -51,7 +51,7 @@ Verbodus automatically color-codes your benchmark results based on latency and t
 ### Prerequisites
 
 To run Verbodus locally, ensure you have:
-1. **Node.js** (v18 or higher recommended)
+1. **Bun** (v1.0 or higher recommended)
 2. **Rust & Cargo** (required for compiling the Tauri desktop client)
 3. **Local LLM Engine** (any OpenAI-compatible API running locally):
    - **Ollama**: [Download & Install](https://ollama.com) (Default API port: `11434`)
@@ -67,7 +67,7 @@ To run Verbodus locally, ensure you have:
 
 2. Install dependencies:
    ```bash
-   npm install
+   bun install
    ```
 
 ### Running the Application
@@ -75,20 +75,20 @@ To run Verbodus locally, ensure you have:
 #### 🌐 Running in the Web Browser (Vite Dev Server)
 To run a fast-loading web-only preview in your default browser:
 ```bash
-npm run dev
+bun dev
 ```
 Open `http://localhost:1420` in your browser.
 
 #### 🖥️ Running as a Desktop App (Tauri Development Mode)
 To compile the Tauri Rust backend and launch the native desktop window:
 ```bash
-npm run tauri dev
+bun tauri dev
 ```
 
 #### 📦 Building the Production Binary
 To package the final, production-ready desktop bundle:
 ```bash
-npm run tauri build
+bun tauri build
 ```
 This compiles the Rust backend in release mode and bundles the Vue assets. The final `.app` or installer will be located in `src-tauri/target/release/bundle/`.
 
