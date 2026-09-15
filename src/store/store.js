@@ -161,6 +161,8 @@ export const store = reactive({
   // latency distribution (p50/p95/p99). Frontend only orchestrates start/cancel;
   // the actual HTTP & timing happens on the Rust side (see src-tauri/src/concurrency.rs).
   concurrency: {
+    // 'cancelled' = user stopped it early; `result` still holds the partial
+    // summary (flagged `cancelled: true` by Rust) but it is not saved to history.
     status: "idle",       // idle | running | completed | error | cancelled
     profileIndex: 0,
     prompt: "",
@@ -1108,12 +1110,19 @@ export async function runConcurrency() {
       onEvent: channel,
     });
     c.result = summary;
-    c.status = "completed";
-    saveConcurrencyToHistory(profile, config);
+    if (summary?.cancelled) {
+      // Stopped by the user before the configured duration. Keep the partial
+      // summary on screen for inspection, but don't persist it: a truncated
+      // window isn't comparable with the full-duration sessions in history.
+      c.status = "cancelled";
+    } else {
+      c.status = "completed";
+      saveConcurrencyToHistory(profile, config);
+    }
   } catch (err) {
-    // User cancellation cleanly ends the command on the Rust side too — the
-    // task returns a summary with whatever data was collected. If we land here
-    // it's a real error (invoke threw).
+    // Both the deadline and a user cancel end the Rust command cleanly with a
+    // summary (see `cancelled` above). If we land here it's a real error —
+    // the invoke itself threw (re-entry, bad config, HTTP client build).
     c.status = "error";
     c.error = typeof err === "string" ? err : err?.message || String(err);
     console.error("Concurrency benchmark error:", err);

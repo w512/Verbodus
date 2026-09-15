@@ -125,9 +125,12 @@ const fmtDate = (iso) => {
         </div>
         <p class="note muted">
           ⓘ N workers start at once and keep firing new requests until the duration
-          ends or a single request stalls past the stall timeout. The headline
-          number is <strong>aggregate TPS</strong> — sum of all completion tokens
-          across the wall-clock duration. Watch p95/p99 TTFT — that's where queue
+          ends. A request that goes silent past the stall timeout is counted as
+          <strong>failed</strong>; the run itself keeps going. Requests still in
+          flight when the clock runs out are reported as <strong>cut off</strong>
+          — their partial output counts toward the headline
+          <strong>aggregate TPS</strong> (all completion tokens produced inside the
+          window / wall-clock time). Watch p95/p99 TTFT — that's where queue
           buildup shows up first.
         </p>
       </div>
@@ -180,15 +183,17 @@ const fmtDate = (iso) => {
         <strong>❌ Error:</strong> {{ c.error }}
       </div>
       <div v-else-if="c.status === 'cancelled'" class="card glass-card cancel-card">
-        <strong>⏹ Cancelled.</strong>
+        <strong>⏹ Cancelled.</strong> Stopped after {{ c.result ? fmtSecs(c.result.durationMs) : '—' }}
+        of {{ c.durationSecs }} s. Partial results are shown below for inspection; nothing was saved.
       </div>
 
       <!-- Result -->
       <div v-if="c.result" class="card glass-card result-card">
         <div class="card-header">
-          <span class="title">Result</span>
+          <span class="title">{{ c.result.cancelled ? 'Partial result' : 'Result' }}</span>
           <span class="muted">
             {{ c.result.completed }} ok · {{ c.result.failed }} failed
+            <template v-if="c.result.truncated"> · {{ c.result.truncated }} cut off</template>
             ({{ fmtPct(finalSuccessRate) }} success) over {{ fmtSecs(c.result.durationMs) }}
           </span>
         </div>
@@ -198,7 +203,9 @@ const fmtDate = (iso) => {
             <span class="headline-val" :class="tpsClass(c.result.aggregateTps)">
               {{ fmtNum(c.result.aggregateTps) }}
             </span>
-            <span class="headline-sub">total tokens / wall-time</span>
+            <span class="headline-sub">
+              {{ c.result.totalTokens }} tokens / wall-time<template v-if="c.result.truncated">, incl. in-flight at cutoff</template>
+            </span>
           </div>
           <div class="headline-cell">
             <span class="headline-label">Req / s</span>
@@ -266,7 +273,9 @@ const fmtDate = (iso) => {
               <span :class="ttftClass(s.result.ttftP50Ms)">p50 {{ fmtMs(s.result.ttftP50Ms) }}</span>
               <span :class="ttftClass(s.result.ttftP95Ms)">p95 {{ fmtMs(s.result.ttftP95Ms) }}</span>
               <span class="sep">·</span>
-              <span class="muted">{{ s.result.completed }} ok / {{ s.result.failed }} fail</span>
+              <span class="muted">
+                {{ s.result.completed }} ok / {{ s.result.failed }} fail<template v-if="s.result.truncated"> / {{ s.result.truncated }} cut</template>
+              </span>
             </div>
           </div>
         </div>
