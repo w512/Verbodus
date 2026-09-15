@@ -441,6 +441,24 @@ watch(
   { deep: true }
 );
 
+// Sampling parameters from the config form. Note: `parseFloat(x) || default`
+// would silently turn a legitimate `temperature: 0` (deterministic decoding —
+// exactly what you want for a reproducible benchmark) into the default, because
+// 0 is falsy. Only fall back when the value is genuinely missing/unparseable.
+function numberOr(value, fallback) {
+  const n = typeof value === "number" ? value : parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function temperatureOf(config) {
+  return Math.max(0, numberOr(config.temperature, 0.7));
+}
+
+function maxTokensOf(config) {
+  const n = Math.floor(numberOr(config.maxTokens, 512));
+  return n >= 1 ? n : 512;
+}
+
 // Builds the OpenAI-compatible chat/completions request from the given config.
 function buildRequest(promptText, config) {
   const url = config.url.trim().replace(/\/$/, "");
@@ -460,8 +478,8 @@ function buildRequest(promptText, config) {
   const body = {
     model: config.model,
     messages,
-    temperature: parseFloat(config.temperature) || 0.7,
-    max_tokens: parseInt(config.maxTokens) || 512,
+    temperature: temperatureOf(config),
+    max_tokens: maxTokensOf(config),
     stream: config.stream,
     stream_options: config.stream ? { include_usage: true } : undefined,
   };
@@ -1062,8 +1080,8 @@ export async function runConcurrency() {
     apiKey: profile.apiKey || "",
     model: profile.model || "",
     systemPrompt: profile.systemPrompt || "",
-    temperature: parseFloat(profile.temperature) || 0.7,
-    maxTokens: parseInt(profile.maxTokens) || 512,
+    temperature: temperatureOf(profile),
+    maxTokens: maxTokensOf(profile),
     prompt: c.prompt,
     concurrency: Math.max(1, parseInt(c.workers) || 1),
     durationSecs: Math.max(1, parseInt(c.durationSecs) || 30),
