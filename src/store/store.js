@@ -14,6 +14,16 @@ const httpFetch = isTauri() ? tauriFetch : globalThis.fetch.bind(globalThis);
 // timeout, since legitimate long generations keep streaming.
 const STALL_TIMEOUT_MS = 60000;
 
+// Non-streaming requests deliver nothing until the whole completion is done,
+// so "no bytes for 60 s" is the *normal* case for a slow model with a long
+// max_tokens — a stall timer would abort perfectly healthy requests. Use a
+// generous total ceiling instead; it only exists to catch a truly hung server.
+const NON_STREAM_TIMEOUT_MS = 10 * 60 * 1000;
+
+// GET /models is a tiny metadata call — a hung endpoint should not leave the
+// model picker stuck in "loading" with its button disabled forever.
+const MODELS_TIMEOUT_MS = 15000;
+
 // Tracks the in-flight single-run benchmark so it can be cancelled (issue #4).
 // Co-tenancy uses its own controllers (see `cotenancyControllers` below).
 // Abort cause is read off `controller.signal.reason`, set when we call
@@ -72,18 +82,43 @@ function withBenchDefaults(profile) {
   return { iterations: 1, warmup: 0, ...profile };
 }
 
+// Reads a JSON array from localStorage. A corrupt or foreign value (truncated
+// write, manual edit, a different app under the same origin in `bun dev`)
+// must not take the whole app down with a SyntaxError at module load — fall
+// back to `fallback` and log, keeping the bad value in place for inspection.
+function loadArray(key, fallback) {
+  const raw = localStorage.getItem(key);
+  if (raw == null) return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new TypeError(`expected an array, got ${typeof parsed}`);
+    return parsed;
+  } catch (err) {
+    console.error(`Ignoring corrupt localStorage["${key}"]:`, err);
+    return fallback;
+  }
+}
+
+// Profiles need one more guarantee: the app assumes at least one profile with
+// a string `url` exists (the config form, every runner and `initSecrets` index
+// into it). Drop malformed entries and restore the presets if nothing is left.
+function loadProfiles() {
+  const stored = loadArray("speedometer_profiles", null);
+  if (stored == null) return DEFAULT_PRESETS.map((p) => ({ ...p }));
+  const valid = stored.filter(
+    (p) => p && typeof p === "object" && typeof p.name === "string" && p.name.trim() && typeof p.url === "string"
+  );
+  if (valid.length !== stored.length) {
+    console.error(`Dropped ${stored.length - valid.length} malformed profile(s) from localStorage.`);
+  }
+  return valid.length ? valid : DEFAULT_PRESETS.map((p) => ({ ...p }));
+}
+
 // Load saved data from localStorage
-const storedProfiles = localStorage.getItem("speedometer_profiles");
-const initialProfiles = storedProfiles ? JSON.parse(storedProfiles) : DEFAULT_PRESETS;
-
-const storedRuns = localStorage.getItem("speedometer_runs");
-const initialRuns = storedRuns ? JSON.parse(storedRuns) : [];
-
-const storedCotenancyRuns = localStorage.getItem("speedometer_cotenancy_runs");
-const initialCotenancyRuns = storedCotenancyRuns ? JSON.parse(storedCotenancyRuns) : [];
-
-const storedConcurrencyRuns = localStorage.getItem("speedometer_concurrency_runs");
-const initialConcurrencyRuns = storedConcurrencyRuns ? JSON.parse(storedConcurrencyRuns) : [];
+const initialProfiles = loadProfiles();
+const initialRuns = loadArray("speedometer_runs", []);
+const initialCotenancyRuns = loadArray("speedometer_cotenancy_runs", []);
+const initialConcurrencyRuns = loadArray("speedometer_concurrency_runs", []);
 
 export const store = reactive({
   // Navigation & Views
@@ -202,10 +237,16 @@ export const store = reactive({
   selectProfile(index) {
     if (this.isBusy()) return;
     if (!this.profiles[index]) return;
+    // Commit any edit still sitting in the auto-save debounce to the profile
+    // we're leaving — otherwise a quick edit-then-switch would save the *new*
+    // profile's values and drop the edit.
+    flushAutoSave();
     this.activeProfileIndex = index;
     this.config = withBenchDefaults(this.profiles[index]);
     // Model list is endpoint-specific — drop it so it isn't shown for a
-    // profile pointing at a different server.
+    // profile pointing at a different server, and make sure a fetch still in
+    // flight for the old endpoint can't land in the new profile's picker.
+    modelsController?.abort("superseded");
     this.models.list = [];
     this.models.status = "idle";
     this.models.error = "";
@@ -235,16 +276,23 @@ export const store = reactive({
   // profile immediately, including default presets).
   saveActiveProfile() {
     const idx = this.activeProfileIndex;
-    const name = this.profiles[idx].name;
+    const prev = this.profiles[idx];
+    if (!prev) return;
+    const name = prev.name;
     this.profiles[idx] = { ...this.config, name };
     persistProfiles();
-    setApiKey(name, this.config.apiKey || "");
+    // The vault write is the expensive part (argon2-protected snapshot on
+    // disk) and fires for every debounced edit, every profile switch and once
+    // at startup — skip it unless the key actually changed.
+    const key = this.config.apiKey || "";
+    if (key !== (prev.apiKey || "")) setApiKey(name, key);
   },
 
   deleteProfile(index) {
     if (this.isBusy()) return;
     if (this.profiles.length <= 1) return;
     if (!this.profiles[index]) return;
+    flushAutoSave();
     const name = this.profiles[index].name;
     this.profiles.splice(index, 1);
     this.activeProfileIndex = Math.min(this.activeProfileIndex, this.profiles.length - 1);
@@ -461,10 +509,24 @@ watch(
   () => {
     if (!store.profiles[store.activeProfileIndex]) return;
     clearTimeout(autoSaveTimer);
-    autoSaveTimer = setTimeout(() => store.saveActiveProfile(), 250);
+    autoSaveTimer = setTimeout(() => {
+      autoSaveTimer = null;
+      store.saveActiveProfile();
+    }, 250);
   },
   { deep: true }
 );
+
+// Runs a pending debounced auto-save immediately (no-op when nothing is
+// pending). Called before anything that reads `store.profiles` as the source
+// of truth — profile switch/delete, Co-Tenancy and Concurrency start — so an
+// edit made in the last 250 ms is not silently left out.
+function flushAutoSave() {
+  if (autoSaveTimer == null) return;
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  store.saveActiveProfile();
+}
 
 // Sampling parameters from the config form. Note: `parseFloat(x) || default`
 // would silently turn a legitimate `temperature: 0` (deterministic decoding —
@@ -565,35 +627,64 @@ function resetSink(sink) {
 // caller can distinguish them. Does not touch series/co-tenancy/history state
 // — that is the caller's job. Configurable via the passed `config` (a profile
 // snapshot), so multiple runs against different endpoints can fly in parallel.
+// Endpoints that answered 400 to a request carrying `stream_options`. Older
+// OpenAI-compatible servers/proxies reject unknown fields outright; once we
+// learn that, later runs against the same endpoint omit the field up front so
+// the measured request is the first one sent (no retry inside the timing).
+const noStreamOptionsEndpoints = new Set();
+
+// Human-readable timeout for the error message — depends on the mode, since
+// streaming uses an inactivity window and non-streaming a total ceiling.
+function timeoutSeconds(config) {
+  return (config?.stream ? STALL_TIMEOUT_MS : NON_STREAM_TIMEOUT_MS) / 1000;
+}
+
 async function executeRun(promptText, config, controller, sink) {
   resetSink(sink);
 
   const { endpoint, headers, body } = buildRequest(promptText, config);
+  if (noStreamOptionsEndpoints.has(endpoint)) delete body.stream_options;
 
-  const startTime = performance.now();
+  let startTime = performance.now();
   let firstTokenTime = null;
   let lastTokenTime = null;
   let tokenCount = 0;
 
-  // Inactivity timeout for this request (issue #4); aborts only THIS controller
-  // (so a peer in a paired run is unaffected by one side stalling).
+  // Timeout for this request (issue #4); aborts only THIS controller (so a peer
+  // in a paired run is unaffected by one side stalling). Streaming re-arms the
+  // inactivity window on every chunk; non-streaming arms one total ceiling,
+  // because "no bytes yet" is what a healthy non-stream request looks like
+  // until the very end.
   let stallTimer = null;
-  const armStall = () => {
+  const armStall = (ms) => {
     clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => controller.abort("timeout"), STALL_TIMEOUT_MS);
+    stallTimer = setTimeout(() => controller.abort("timeout"), ms);
   };
 
   try {
-    armStall();
-    const response = await httpFetch(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    let response;
+    let requestBody = body;
+    for (let attempt = 0; ; attempt++) {
+      armStall(config.stream ? STALL_TIMEOUT_MS : NON_STREAM_TIMEOUT_MS);
+      startTime = performance.now(); // a retry must not inherit the failed round trip
+      response = await httpFetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+      if (response.ok) break;
 
-    if (!response.ok) {
       const errText = await response.text();
+      // First 400 with stream_options present: assume the server doesn't know
+      // the field (the usual cause), drop it and retry once. Error wording
+      // varies too much between servers to key off the message.
+      if (attempt === 0 && response.status === 400 && requestBody.stream_options) {
+        console.warn(`${endpoint} rejected stream_options (400); retrying without it.`);
+        noStreamOptionsEndpoints.add(endpoint);
+        requestBody = { ...requestBody, stream_options: undefined };
+        continue;
+      }
       throw new Error(`API Error (${response.status}): ${errText || response.statusText}`);
     }
 
@@ -646,7 +737,7 @@ async function executeRun(promptText, config, controller, sink) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      armStall(); // bytes arrived — reset the inactivity timer
+      armStall(STALL_TIMEOUT_MS); // bytes arrived — reset the inactivity timer
       buffer += decoder.decode(value, { stream: true });
       const events = buffer.split(EVENT_SEP);
       buffer = events.pop(); // keep tail (possibly incomplete event) for next chunk
@@ -827,7 +918,9 @@ export async function runBenchmark(promptText) {
     } else if (reason === "timeout") {
       store.activeRun.status = "error";
       store.series.status = "error";
-      store.activeRun.error = `Request timed out after ${STALL_TIMEOUT_MS / 1000}s with no response.`;
+      store.activeRun.error = config.stream
+        ? `Request timed out: no data for ${timeoutSeconds(config)}s.`
+        : `Request timed out: no response within ${timeoutSeconds(config)}s (non-streaming).`;
     } else {
       store.activeRun.status = "error";
       store.series.status = "error";
@@ -848,7 +941,16 @@ export function cancelBenchmark() {
 
 // Fetches the model catalogue from the active endpoint's GET /models
 // (OpenAI-compatible: Ollama, LM Studio, vLLM, cloud APIs all expose it).
+let modelsController = null; // in-flight GET /models, so a newer call can supersede it
+
 export async function fetchModels() {
+  // Supersede a previous in-flight fetch (e.g. user clicked twice or switched
+  // endpoint) — its late result must not overwrite the newer one.
+  modelsController?.abort("superseded");
+  const controller = new AbortController();
+  modelsController = controller;
+  const timer = setTimeout(() => controller.abort("timeout"), MODELS_TIMEOUT_MS);
+
   store.models.status = "loading";
   store.models.error = "";
   store.models.list = [];
@@ -860,7 +962,11 @@ export async function fetchModels() {
   }
 
   try {
-    const response = await httpFetch(`${url}/models`, { method: "GET", headers });
+    const response = await httpFetch(`${url}/models`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
     if (!response.ok) {
       const errText = await response.text();
       throw new Error(`HTTP ${response.status}: ${errText || response.statusText}`);
@@ -875,9 +981,16 @@ export async function fetchModels() {
     store.models.list = ids;
     store.models.status = "loaded";
   } catch (err) {
+    if (controller.signal.reason === "superseded") return; // newer call owns the state
     store.models.status = "error";
-    store.models.error = err.message;
+    store.models.error =
+      controller.signal.reason === "timeout"
+        ? `No response from ${url}/models within ${MODELS_TIMEOUT_MS / 1000}s.`
+        : err.message;
     console.error("Failed to fetch models:", err);
+  } finally {
+    clearTimeout(timer);
+    if (modelsController === controller) modelsController = null;
   }
 }
 
@@ -976,6 +1089,7 @@ function computeDelta(solo, paired) {
 
 export async function runCotenancy() {
   const ct = store.cotenancy;
+  flushAutoSave(); // profiles are the source of truth here — include the latest edit
   const profA = store.profiles[ct.profileAIndex];
   const profB = store.profiles[ct.profileBIndex];
   if (!profA || !profB) {
@@ -1063,7 +1177,7 @@ export async function runCotenancy() {
       ct.error = "Co-tenancy test cancelled.";
     } else if (timedOut) {
       ct.status = "error";
-      ct.error = `One endpoint went idle longer than ${STALL_TIMEOUT_MS / 1000}s.`;
+      ct.error = `One endpoint timed out (streaming: no data for ${STALL_TIMEOUT_MS / 1000}s; non-streaming: no response within ${NON_STREAM_TIMEOUT_MS / 1000}s).`;
     } else {
       ct.status = "error";
       ct.error = err?.message || String(err);
@@ -1090,6 +1204,7 @@ export function cancelCotenancy() {
 // shows an error.
 export async function runConcurrency() {
   const c = store.concurrency;
+  flushAutoSave(); // profiles are the source of truth here — include the latest edit
   const profile = store.profiles[c.profileIndex];
   if (!profile) {
     c.status = "error";
