@@ -40,6 +40,9 @@ pub struct RequestMetrics {
     pub tps: Option<f64>,
     pub tokens: u64,
     pub success: bool,
+    /// Cut off mid-flight by the deadline or a user cancel. Neither a success
+    /// nor a failure; `tokens` holds whatever was streamed before the cut.
+    pub cancelled: bool,
     pub error: Option<String>,
 }
 
@@ -51,7 +54,20 @@ impl RequestMetrics {
             tps: None,
             tokens: 0,
             success: false,
+            cancelled: false,
             error: Some(msg),
+        }
+    }
+
+    fn truncated(tokens: u64, ttft_ms: Option<u64>) -> Self {
+        Self {
+            ttft_ms,
+            tpot_ms: None,
+            tps: None,
+            tokens,
+            success: false,
+            cancelled: true,
+            error: None,
         }
     }
 }
@@ -75,6 +91,16 @@ pub enum ProgressEvent {
 pub struct SummaryResult {
     pub completed: u64,
     pub failed: u64,
+    /// Requests still in flight when the run ended (deadline or user cancel).
+    /// Not failures: their partial output is counted in `total_tokens`, and
+    /// their TTFT (if the first token arrived) is included in the TTFT
+    /// percentiles — dropping them would bias TTFT toward fast requests.
+    /// TPOT / per-request TPS come from completed requests only.
+    pub truncated: u64,
+    /// True when the user stopped the run before the configured duration.
+    pub cancelled: bool,
+    /// Completion tokens produced inside the measurement window, including the
+    /// partial output of `truncated` requests.
     pub total_tokens: u64,
     pub duration_ms: u64,
     pub aggregate_tps: f64,
@@ -92,6 +118,7 @@ pub struct SummaryResult {
 struct RunningStats {
     completed: u64,
     failed: u64,
+    truncated: u64,
     total_tokens: u64,
     ttfts: Vec<u64>,
     tpots: Vec<u64>,
@@ -104,6 +131,10 @@ struct RunningStats {
 
 #[derive(Default)]
 pub struct ConcurrencyState {
+    /// User-cancel token for the run in flight. The run itself works on a
+    /// *child* of this token (see `run_inner`): the deadline cancels the child
+    /// only, the user cancels the parent (which propagates to the child), so at
+    /// the end `parent.is_cancelled()` tells the two apart.
     pub cancel: Mutex<Option<CancellationToken>>,
 }
 
@@ -124,9 +155,9 @@ pub async fn run_concurrency_benchmark(
         }
         *guard = Some(CancellationToken::new());
     }
-    let cancel_token = state.cancel.lock().unwrap().clone().unwrap();
+    let user_token = state.cancel.lock().unwrap().clone().unwrap();
 
-    let result = run_inner(config, on_event, cancel_token).await;
+    let result = run_inner(config, on_event, user_token).await;
 
     // Always release the cancel slot so the next run can start.
     *state.cancel.lock().unwrap() = None;
@@ -145,12 +176,17 @@ pub fn cancel_concurrency_benchmark(state: State<'_, ConcurrencyState>) {
 async fn run_inner(
     config: ConcurrencyConfig,
     on_event: Channel<ProgressEvent>,
-    cancel_token: CancellationToken,
+    user_token: CancellationToken,
 ) -> Result<SummaryResult, String> {
     let concurrency = config.concurrency.max(1);
     let duration = Duration::from_secs(config.duration_secs.max(1) as u64);
     let start = Instant::now();
     let deadline = start + duration;
+
+    // Everything below stops on `cancel_token`; it fires either from the
+    // deadline watcher (normal end of run) or via `user_token` (user pressed
+    // Cancel). Cancelling the child never cancels the parent.
+    let cancel_token = user_token.child_token();
 
     let client = reqwest::Client::builder()
         // Per-request hard ceiling; the per-chunk stall timer fires first under
@@ -175,15 +211,15 @@ async fn run_inner(
                     let mut s = stats.lock().await;
                     s.in_flight += 1;
                 }
-                let metric = tokio::select! {
-                    biased;
-                    _ = token.cancelled() => {
-                        let mut s = stats.lock().await;
-                        s.in_flight = s.in_flight.saturating_sub(1);
-                        break;
-                    }
-                    m = run_one_request(&client, &cfg, &token) => m,
-                };
+                // `run_one_request` is itself cancellation-aware (it races the
+                // token before `send` and between every chunk) and returns a
+                // *truncated* metric carrying the tokens streamed so far. We must
+                // await it directly rather than `select!` it against the token:
+                // racing here would drop the future on cancel and silently lose
+                // every token the in-flight requests had already produced —
+                // with long generations that was up to half the run's output,
+                // and aggregate TPS was understated accordingly.
+                let metric = run_one_request(&client, &cfg, &token).await;
                 let mut s = stats.lock().await;
                 s.in_flight = s.in_flight.saturating_sub(1);
                 record_metric(metric, &mut s);
@@ -250,6 +286,8 @@ async fn run_inner(
     Ok(SummaryResult {
         completed: s.completed,
         failed: s.failed,
+        truncated: s.truncated,
+        cancelled: user_token.is_cancelled(),
         total_tokens: s.total_tokens,
         duration_ms,
         aggregate_tps,
@@ -292,6 +330,18 @@ async fn emit_progress(
 }
 
 fn record_metric(metric: RequestMetrics, s: &mut RunningStats) {
+    if metric.cancelled {
+        // Cut off mid-stream by the deadline / user. The tokens it produced were
+        // real server work inside the window, so they belong in total_tokens;
+        // its TTFT (when measured) is a complete observation too. TPOT/TPS are
+        // not recorded — the request never reached a natural end.
+        s.truncated += 1;
+        s.total_tokens += metric.tokens;
+        if let Some(v) = metric.ttft_ms {
+            s.ttfts.push(v);
+        }
+        return;
+    }
     if metric.success {
         s.completed += 1;
         s.total_tokens += metric.tokens;
@@ -351,9 +401,16 @@ async fn run_one_request(
     }
 
     let start = Instant::now();
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => return RequestMetrics::failure(format!("Request send failed: {e}")),
+    // `send` resolves on response headers — under heavy queueing that alone can
+    // take seconds, so it must be cancellable or Cancel would hang until the
+    // server answers (or the 10-minute client timeout).
+    let resp = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => return RequestMetrics::truncated(0, None),
+        r = req.send() => match r {
+            Ok(r) => r,
+            Err(e) => return RequestMetrics::failure(format!("Request send failed: {e}")),
+        },
     };
 
     if !resp.status().is_success() {
@@ -374,7 +431,12 @@ async fn run_one_request(
     loop {
         let next = tokio::select! {
             biased;
-            _ = cancel_token.cancelled() => return RequestMetrics::failure("Cancelled".into()),
+            _ = cancel_token.cancelled() => {
+                return RequestMetrics::truncated(
+                    chunk_count,
+                    first_token.map(|f| (f - start).as_millis() as u64),
+                );
+            }
             _ = tokio::time::sleep(stall) => return RequestMetrics::failure(
                 format!("Stream stalled (> {}s without data)", stall.as_secs()),
             ),
@@ -457,6 +519,7 @@ async fn run_one_request(
         tps,
         tokens,
         success: tokens > 0,
+        cancelled: false,
         error: if tokens > 0 {
             None
         } else {
@@ -584,5 +647,61 @@ mod tests {
         let s = format!("{}{}", "é".repeat(239), "🦀🦀🦀");
         let t = truncate_chars(&s, 240);
         assert_eq!(t, format!("{}🦀…", "é".repeat(239)));
+    }
+
+    fn success_metric(tokens: u64, ttft: u64) -> RequestMetrics {
+        RequestMetrics {
+            ttft_ms: Some(ttft),
+            tpot_ms: Some(20),
+            tps: Some(50.0),
+            tokens,
+            success: true,
+            cancelled: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn record_metric_truncated_counts_tokens_and_ttft_but_not_completion() {
+        let mut s = RunningStats::default();
+        record_metric(success_metric(100, 200), &mut s);
+        record_metric(RequestMetrics::truncated(37, Some(900)), &mut s);
+        record_metric(RequestMetrics::truncated(0, None), &mut s); // cut before first token
+
+        assert_eq!(s.completed, 1);
+        assert_eq!(s.failed, 0);
+        assert_eq!(s.truncated, 2);
+        assert_eq!(s.total_tokens, 137, "partial tokens must reach the aggregate");
+        assert_eq!(s.ttfts, vec![200, 900], "measured TTFT of a cut request is a valid sample");
+        assert_eq!(s.tpots.len(), 1, "no TPOT from a request that never finished");
+        assert_eq!(s.per_req_tps.len(), 1);
+        assert!(s.errors.is_empty(), "truncation is not an error");
+    }
+
+    #[test]
+    fn record_metric_failure_is_not_truncated() {
+        let mut s = RunningStats::default();
+        record_metric(RequestMetrics::failure("HTTP 500".into()), &mut s);
+        assert_eq!(s.failed, 1);
+        assert_eq!(s.truncated, 0);
+        assert_eq!(s.total_tokens, 0);
+        assert_eq!(s.errors, vec!["HTTP 500".to_string()]);
+    }
+
+    #[test]
+    fn user_cancel_is_distinguishable_from_deadline_via_child_token() {
+        // Deadline path: cancel the child only.
+        let user = CancellationToken::new();
+        let run = user.child_token();
+        run.cancel();
+        assert!(run.is_cancelled());
+        assert!(!user.is_cancelled(), "deadline must not look like a user cancel");
+
+        // User path: cancel the parent, child follows.
+        let user = CancellationToken::new();
+        let run = user.child_token();
+        user.cancel();
+        assert!(run.is_cancelled());
+        assert!(user.is_cancelled());
     }
 }
