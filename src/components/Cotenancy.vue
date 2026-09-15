@@ -3,10 +3,18 @@ import { computed } from "vue";
 import { store, runCotenancy, cancelCotenancy } from "../store/store.js";
 import { ttftClass, tpotClass, tpsClass } from "../store/metrics.js";
 import { confirmDialog } from "../store/dialog.js";
+import { renderMarkdown, onMarkdownClick } from "../store/markdown.js";
 
 const ct = store.cotenancy;
 
 const isRunning = computed(() => ct.status === "running");
+
+// Rendered once per side after the session ends; empty while running so the
+// parser never competes with the two live SSE streams for the main thread.
+const renderedResponse = computed(() => ({
+  A: isRunning.value ? "" : renderMarkdown(ct.live.A.responseText),
+  B: isRunning.value ? "" : renderMarkdown(ct.live.B.responseText),
+}));
 
 const phaseLabel = computed(() => {
   switch (ct.phase) {
@@ -201,7 +209,12 @@ const fmtDate = (iso) => {
             </div>
           </div>
           <div class="live-response scroller">
-            <pre v-if="ct.live[side].responseText">{{ ct.live[side].responseText }}</pre>
+            <template v-if="ct.live[side].responseText">
+              <!-- Same policy as the Playground: raw text while measuring,
+                   markdown once the session has reached a final state. -->
+              <pre v-if="isRunning">{{ ct.live[side].responseText }}</pre>
+              <div v-else class="markdown" v-html="renderedResponse[side]" @click="onMarkdownClick"></div>
+            </template>
             <p v-else class="loading-text">No output yet.</p>
           </div>
         </div>
@@ -451,6 +464,13 @@ const fmtDate = (iso) => {
   color: var(--text-primary);
   user-select: text;
   margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+}
+.live-response :deep(.markdown) {
+  color: var(--text-primary);
+  user-select: text;
+  word-wrap: break-word;
 }
 .loading-text { color: var(--text-muted); font-style: italic; }
 

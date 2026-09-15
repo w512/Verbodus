@@ -53,10 +53,23 @@ watch(
 );
 
 // Each new run starts following again — otherwise after one "user scrolled
-// up" session every subsequent run would also refuse to track.
+// up" session every subsequent run would also refuse to track. When a run
+// ends, the output swaps from <pre> to rendered markdown (see `isStreaming`),
+// which changes the box's height — re-pin to the bottom if we were following,
+// so the user isn't left staring at the middle of the text.
 watch(
   () => store.activeRun.status,
-  (s) => { if (s === "running") followBottom.value = true; }
+  (s) => {
+    if (s === "running") {
+      followBottom.value = true;
+      return;
+    }
+    if (!followBottom.value) return;
+    nextTick(() => {
+      const el = responseContainer.value;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }
 );
 
 // Performance color bands come from the shared src/store/metrics.js helpers
@@ -90,11 +103,19 @@ const ttftView = computed(() => metricView("ttft", store.activeRun.ttft, "ms"));
 const tpotView = computed(() => metricView("tpot", store.activeRun.tpot, "ms"));
 const tpsView = computed(() => metricView("tps", store.activeRun.tps, "tps"));
 
-// LLM responses often contain markdown (code fences, lists, headings); rendering
-// them as plain <pre> hides that structure. Partial markdown during a stream may
-// look a bit raw (unclosed code fence renders as literal until ``` arrives) —
-// acceptable, the final render is what the user reads.
-const responseHtml = computed(() => renderMarkdown(store.activeRun.responseText));
+// Output rendering strategy. While the stream is live we show raw text in a
+// <pre>: this is a benchmark, and re-parsing the whole growing response
+// through marked + highlight.js + DOMPurify on *every token* is O(n²) work on
+// the same thread that timestamps the SSE chunks — it jitters the live TPS
+// curve, delays the last-token timestamp, and janks the UI on long answers.
+// It also avoids the half-rendered look of partial markdown (an unclosed code
+// fence renders as literal text until ``` arrives). Once the run reaches a
+// final state (completed / cancelled / error) we render markdown exactly once.
+// Co-Tenancy's live panels already use <pre>, so this is also consistent.
+const isStreaming = computed(() => store.activeRun.status === "running");
+const responseHtml = computed(() =>
+  isStreaming.value ? "" : renderMarkdown(store.activeRun.responseText)
+);
 </script>
 
 <template>
@@ -176,8 +197,8 @@ const responseHtml = computed(() => renderMarkdown(store.activeRun.responseText)
               @scroll.passive="onResponseScroll"
             >
               <template v-if="store.activeRun.responseText">
-                <div class="markdown" v-html="responseHtml" @click="onMarkdownClick"></div>
-                <span v-if="store.activeRun.status === 'running'" class="caret"></span>
+                <pre v-if="isStreaming" class="raw-stream">{{ store.activeRun.responseText }}<span class="caret"></span></pre>
+                <div v-else class="markdown" v-html="responseHtml" @click="onMarkdownClick"></div>
               </template>
               <p v-else-if="store.activeRun.status === 'running'" class="loading-text">Starting generation...</p>
               <p v-else-if="store.activeRun.status === 'error'" class="error-text">{{ store.activeRun.error }}</p>
@@ -414,6 +435,20 @@ textarea {
   color: var(--text-primary);
   user-select: text;
   word-wrap: break-word;
+}
+
+/* Live stream: plain text in the UI font (not monospace — it's prose, and the
+   final markdown render uses the same font, so the swap at completion changes
+   structure but not typeface). */
+.response-box .raw-stream {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .caret {

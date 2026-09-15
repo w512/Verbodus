@@ -99,41 +99,90 @@ function initChart() {
   });
 }
 
-// Watch data points and update chart
-watch(
-  () => props.dataPoints,
-  (newPoints) => {
+// --- Incremental, frame-coalesced updates -----------------------------------
+//
+// The store pushes one point per streamed token. A deep watcher that rebuilt
+// the whole dataset (`map` over every point, `Math.max(...spread)`) and called
+// `chart.update()` per push made each token cost O(n) main-thread work — on
+// the thread that timestamps the SSE chunks. Instead:
+//   * mirror the source array into the dataset and only append points that
+//     arrived since the last sync (O(new points));
+//   * coalesce redraws with requestAnimationFrame, so a burst of tokens inside
+//     one frame costs one `update()`;
+//   * fall back to a full resync only when the source array is replaced (new
+//     run) or its existing values are edited in place — the store rescales
+//     every point's TPS once at the end of a run to match server-reported
+//     token counts, which we detect via first/last point values.
+let mirrored = null;   // the source array currently reflected in the chart
+let rendered = 0;      // how many of its points are in the dataset
+let maxTps = 0;        // running max, for the y-axis suggestedMax
+let rafId = 0;
+
+function fullSync(points) {
+  const ds = chartInstance.data.datasets[0];
+  ds.data = points.map((pt) => ({ x: pt.time, y: pt.tps }));
+  maxTps = 0;
+  for (const pt of points) if (pt.tps > maxTps) maxTps = pt.tps;
+  mirrored = points;
+  rendered = points.length;
+}
+
+function appendNew(points) {
+  const data = chartInstance.data.datasets[0].data;
+  for (let i = rendered; i < points.length; i++) {
+    const pt = points[i];
+    data.push({ x: pt.time, y: pt.tps });
+    if (pt.tps > maxTps) maxTps = pt.tps;
+  }
+  rendered = points.length;
+}
+
+function scheduleDraw() {
+  if (rafId) return;
+  rafId = requestAnimationFrame(() => {
+    rafId = 0;
     if (!chartInstance) return;
-
-    if (newPoints.length === 0) {
-      chartInstance.data.labels = [];
-      chartInstance.data.datasets[0].data = [];
-      chartInstance.update("none");
-      return;
-    }
-
-    // Map data points into labels (X) and coordinates (Y)
-    // Using coordinate layout: {x, y} for a scatter/line structure
-    const data = newPoints.map(pt => ({ x: pt.time, y: pt.tps }));
-    
-    chartInstance.data.datasets[0].data = data;
-    
-    // Auto-scale suggest max if speed exceeds 50
-    const maxTps = Math.max(...newPoints.map(p => p.tps), 0);
+    // Auto-scale the y-axis; never below 50 so slow models don't look spiky.
     chartInstance.options.scales.y.suggestedMax = Math.max(50, Math.ceil(maxTps * 1.15));
+    chartInstance.update("none"); // no animation — this is a live readout
+  });
+}
 
-    chartInstance.update("none"); // Update instantly without animation
+function syncFromProps() {
+  if (!chartInstance) return;
+  const pts = props.dataPoints;
+  if (pts !== mirrored || pts.length < rendered) {
+    fullSync(pts);             // new run (array replaced) or reset
+  } else if (pts.length > rendered) {
+    appendNew(pts);            // the common streaming case
+  } else {
+    fullSync(pts);             // same array, same length → values edited in place
+  }
+  scheduleDraw();
+}
+
+// Shallow dependencies only: array identity, length, and the first/last TPS
+// values (which change when the store rescales the curve at end of run).
+watch(
+  () => {
+    const pts = props.dataPoints;
+    const n = pts.length;
+    return [pts, n, n ? pts[0].tps : 0, n ? pts[n - 1].tps : 0];
   },
-  { deep: true }
+  syncFromProps
 );
 
 onMounted(() => {
   initChart();
+  syncFromProps(); // reflect whatever is already there (KeepAlive re-mounts, etc.)
 });
 
 onBeforeUnmount(() => {
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = 0;
   if (chartInstance) {
     chartInstance.destroy();
+    chartInstance = null;
   }
 });
 </script>
