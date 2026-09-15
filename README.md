@@ -15,12 +15,18 @@ Built with **Tauri v2**, **Vue 3**, and **Chart.js**, Verbodus features a modern
   - **TPS (Tokens Per Second / Throughput)**: Measures overall streaming generation speed.
   - **Token Auditing**: Displays counts for Prompt, Completion, and Total tokens.
 - **Real-Time Throughput Curve**: Renders a dynamic line chart of generation throughput (TPS over time) as token chunks stream in.
+- **Multi-Run Series**: Run a prompt N times with optional warm-up runs; metric cards show the median with min–max range, and history stores the aggregate.
 - **Engine Comparison Dashboard**:
   - Compare up to 4 historical benchmark runs side-by-side.
-  - Dual-axis bar chart contrasting TTFT (ms) against Average TPS.
+  - Dual-axis bar chart contrasting TTFT / TPOT (ms) against Average TPS.
   - Detailed metadata inspector displaying prompt parameters and exact token breakdowns.
-- **Custom API Profiles**: Setup and save configuration presets for local or remote servers. Adjust generation properties like Temperature, Max Tokens, System Prompts, and toggle between Streaming and Non-Streaming modes.
-- **Persistent Storage**: All runs history and API profiles are persisted locally in browser-native storage.
+- **Co-Tenancy Test**: Measures how two models degrade each other on shared hardware. Runs Solo A → Solo B → Paired A∥B and reports the Δ% "cost of cohabitation" for TTFT, TPOT and TPS.
+- **Concurrency Test**: Drives N parallel streaming requests against one endpoint for a fixed duration — natively in Rust, outside the WebView event loop — and reports aggregate TPS, requests/s and p50/p95/p99 TTFT/TPOT distributions. Requests still in flight at the deadline are counted as cut off; their partial output contributes to throughput.
+- **Metrics & Help**: In-app reference explaining how every number is measured and when to distrust it.
+- **Custom API Profiles**: Setup and save configuration presets for local or remote servers. Adjust generation properties like Temperature, Max Tokens, System Prompts, and toggle between Streaming and Non-Streaming modes. Profile edits auto-save; the model picker can fetch the endpoint's `/models` catalogue.
+- **Rendered Output**: Streaming responses render as sanitized Markdown with syntax-highlighted code blocks; links open in the system browser.
+- **Light / Dark Theme** with a sidebar toggle.
+- **Persistent Storage**: Run history and API profiles are persisted locally; API keys live in an encrypted Stronghold vault rather than plaintext storage. The desktop app remembers window size and position.
 
 ---
 
@@ -39,10 +45,12 @@ Verbodus automatically color-codes your benchmark results based on latency and t
 ## 🛠️ Technology Stack
 
 - **Frontend**: Vue 3 (Composition API / `<script setup>`)
-- **Styling**: Vanilla CSS (Custom properties, CSS variables, glassmorphic filters)
+- **Styling**: Vanilla CSS (Custom properties, CSS variables, glassmorphic filters), self-hosted fonts
 - **Charts**: Chart.js (Dual-axis charts & real-time line charts)
-- **Desktop Runtime**: Tauri v2 (utilizing native macOS WebKit / WebViews)
-- **Build System**: Vite
+- **Markdown**: marked + highlight.js, sanitized with DOMPurify
+- **Desktop Runtime**: Tauri v2 (native OS WebView: WKWebView / WebView2 / WebKitGTK)
+- **Backend (Rust)**: reqwest + tokio for the Concurrency benchmark; tauri-plugin-http for cross-origin requests from the UI; tauri-plugin-stronghold for API key storage
+- **Build System**: Vite, Bun
 
 ---
 
