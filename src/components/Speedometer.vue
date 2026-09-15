@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { store, runBenchmark, cancelBenchmark } from "../store/store.js";
 import { ttftClass, tpotClass, tpsClass } from "../store/metrics.js";
-import { renderMarkdown } from "../store/markdown.js";
+import { renderMarkdown, onMarkdownClick } from "../store/markdown.js";
 import ConfigPanel from "./ConfigPanel.vue";
 import SpeedChart from "./SpeedChart.vue";
 
@@ -176,7 +176,7 @@ const responseHtml = computed(() => renderMarkdown(store.activeRun.responseText)
               @scroll.passive="onResponseScroll"
             >
               <template v-if="store.activeRun.responseText">
-                <div class="markdown" v-html="responseHtml"></div>
+                <div class="markdown" v-html="responseHtml" @click="onMarkdownClick"></div>
                 <span v-if="store.activeRun.status === 'running'" class="caret"></span>
               </template>
               <p v-else-if="store.activeRun.status === 'running'" class="loading-text">Starting generation...</p>

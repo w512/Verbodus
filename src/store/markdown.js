@@ -15,6 +15,8 @@ import { Marked } from "marked";
 import { markedHighlight } from "marked-highlight";
 import hljs from "highlight.js/lib/common";
 import DOMPurify from "dompurify";
+import { isTauri } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 // Minimal HTML escape — used as the last-resort fallback inside the highlight
 // callback. `highlight.js` itself escapes its output, but if we ever take the
@@ -55,11 +57,46 @@ export function renderMarkdown(text) {
   if (!text) return "";
   const dirty = marked.parse(text);
   // ADD_ATTR keeps highlight.js's class names intact (DOMPurify allows `class`
-  // by default; listed for clarity). Links open in same tab — Tauri has no real
-  // address bar and we don't want `target="_blank"` opening system browsers
-  // implicitly.
+  // by default; listed for clarity). Links are left as plain <a href> — clicks
+  // are intercepted by `onMarkdownClick` below and routed to the OS browser.
   return DOMPurify.sanitize(dirty, {
     USE_PROFILES: { html: true },
     ADD_ATTR: ["class"],
   });
+}
+
+// Schemes we are willing to hand to the OS. Anything else (javascript:, data:,
+// file:, custom app schemes) is dropped — DOMPurify already strips the
+// dangerous ones, this is the second belt.
+const OPENABLE_SCHEMES = new Set(["http:", "https:", "mailto:"]);
+
+// Delegated click handler for containers rendered with `renderMarkdown`.
+//
+// Without this, a click on an <a href> inside a Tauri WebView performs a real
+// navigation: the whole app window is replaced by the external page and there
+// is no address bar or back button to recover — the user has to restart the
+// app. We intercept, cancel the navigation, and open the URL in the system
+// browser via plugin-opener (or a new tab in the `bun dev` web preview).
+export function onMarkdownClick(event) {
+  const anchor = event.target?.closest?.("a[href]");
+  if (!anchor) return;
+  const href = anchor.getAttribute("href") || "";
+  if (href.startsWith("#")) return; // in-page anchor — let the browser scroll
+
+  // Always cancel — even for links we refuse to open, navigating away is worse.
+  event.preventDefault();
+
+  let url;
+  try {
+    url = new URL(href, window.location.href);
+  } catch {
+    return; // unparseable href — ignore
+  }
+  if (!OPENABLE_SCHEMES.has(url.protocol)) return;
+
+  if (isTauri()) {
+    openUrl(url.href).catch((err) => console.error("Failed to open URL:", err));
+  } else {
+    window.open(url.href, "_blank", "noopener,noreferrer");
+  }
 }
