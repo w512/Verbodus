@@ -359,11 +359,7 @@ async fn run_one_request(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        let snippet = if text.len() > 240 {
-            format!("{}…", &text[..240])
-        } else {
-            text
-        };
+        let snippet = truncate_chars(&text, 240);
         return RequestMetrics::failure(format!("HTTP {status}: {snippet}"));
     }
 
@@ -506,6 +502,17 @@ fn extract_data(event_block: &str) -> Option<String> {
     }
 }
 
+// Truncates to at most `max_chars` characters, appending an ellipsis if cut.
+// Slicing by *byte* index (`&s[..n]`) panics when `n` lands inside a multi-byte
+// UTF-8 sequence — error bodies routinely contain non-ASCII (Cyrillic, "…",
+// emoji), and a panic here would silently kill the worker task.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}…", &s[..byte_idx]),
+        None => s.to_string(),
+    }
+}
+
 // ---------- Stats helpers -----------------------------------------------
 
 fn percentile_u64(sorted: &[u64], p: f64) -> Option<u64> {
@@ -536,4 +543,46 @@ fn dedup_errors(errors: &[String], max: usize) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_chars_short_string_untouched() {
+        assert_eq!(truncate_chars("hello", 240), "hello");
+        assert_eq!(truncate_chars("", 240), "");
+    }
+
+    #[test]
+    fn truncate_chars_exact_length_untouched() {
+        let s = "a".repeat(240);
+        assert_eq!(truncate_chars(&s, 240), s);
+    }
+
+    #[test]
+    fn truncate_chars_cuts_ascii_with_ellipsis() {
+        let s = "a".repeat(300);
+        let t = truncate_chars(&s, 240);
+        assert_eq!(t.chars().count(), 241);
+        assert!(t.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_chars_does_not_panic_on_multibyte() {
+        // 300 Cyrillic chars = 600 bytes; byte 240 lands mid-character for
+        // the old `&s[..240]` slicing.
+        let s = "ж".repeat(300);
+        let t = truncate_chars(&s, 240);
+        assert_eq!(t.chars().count(), 241);
+        assert!(t.starts_with(&"ж".repeat(240)));
+    }
+
+    #[test]
+    fn truncate_chars_handles_mixed_width() {
+        let s = format!("{}{}", "é".repeat(239), "🦀🦀🦀");
+        let t = truncate_chars(&s, 240);
+        assert_eq!(t, format!("{}🦀…", "é".repeat(239)));
+    }
 }
