@@ -114,6 +114,17 @@ pub struct SummaryResult {
     pub errors: Vec<String>, // up to 20 distinct error messages
 }
 
+/// Distinct error messages kept for the summary. Deduplicated at insert time:
+/// a dead endpoint fails in ~1 ms, and N workers over a 30 s run would
+/// otherwise accumulate hundreds of thousands of identical strings.
+const MAX_DISTINCT_ERRORS: usize = 20;
+
+/// Per-worker backoff after a failed request. A failing endpoint (connection
+/// refused, 5xx) would otherwise be hammered in a hot loop; back off
+/// exponentially from 250 ms to 5 s and reset on the next success.
+const BACKOFF_BASE: Duration = Duration::from_millis(250);
+const BACKOFF_MAX: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 struct RunningStats {
     completed: u64,
@@ -123,8 +134,16 @@ struct RunningStats {
     ttfts: Vec<u64>,
     tpots: Vec<u64>,
     per_req_tps: Vec<f64>,
-    errors: Vec<String>,
+    errors: Vec<String>, // distinct, capped at MAX_DISTINCT_ERRORS
     in_flight: u32,
+}
+
+fn backoff_for(consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return Duration::ZERO;
+    }
+    let exp = consecutive_failures.saturating_sub(1).min(16);
+    BACKOFF_BASE.saturating_mul(1u32 << exp).min(BACKOFF_MAX)
 }
 
 // ---------- Tauri-managed cancellation state ----------------------------
@@ -206,6 +225,7 @@ async fn run_inner(
         let stats = stats.clone();
         let token = cancel_token.clone();
         handles.push(tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
             while Instant::now() < deadline && !token.is_cancelled() {
                 {
                     let mut s = stats.lock().await;
@@ -220,9 +240,27 @@ async fn run_inner(
                 // with long generations that was up to half the run's output,
                 // and aggregate TPS was understated accordingly.
                 let metric = run_one_request(&client, &cfg, &token).await;
-                let mut s = stats.lock().await;
-                s.in_flight = s.in_flight.saturating_sub(1);
-                record_metric(metric, &mut s);
+                let failed = !metric.success && !metric.cancelled;
+                {
+                    let mut s = stats.lock().await;
+                    s.in_flight = s.in_flight.saturating_sub(1);
+                    record_metric(metric, &mut s);
+                }
+
+                // Back off after a failure so a dead/overloaded endpoint isn't
+                // hammered in a hot loop (and so `failed` reflects a sane retry
+                // cadence rather than how fast connections get refused).
+                if failed {
+                    consecutive_failures += 1;
+                    let wait = backoff_for(consecutive_failures);
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => break,
+                        _ = tokio::time::sleep(wait) => {}
+                    }
+                } else {
+                    consecutive_failures = 0;
+                }
             }
         }));
     }
@@ -298,7 +336,7 @@ async fn run_inner(
         tpot_p95_ms: percentile_u64(&tpots, 0.95),
         tpot_p99_ms: percentile_u64(&tpots, 0.99),
         per_request_tps_median: percentile_f64(&tpses, 0.50),
-        errors: dedup_errors(&s.errors, 20),
+        errors: s.errors.clone(),
     })
 }
 
@@ -357,7 +395,9 @@ fn record_metric(metric: RequestMetrics, s: &mut RunningStats) {
     } else {
         s.failed += 1;
         if let Some(e) = metric.error {
-            s.errors.push(e);
+            if s.errors.len() < MAX_DISTINCT_ERRORS && !s.errors.contains(&e) {
+                s.errors.push(e);
+            }
         }
     }
 }
@@ -482,16 +522,16 @@ async fn run_one_request(
                 chunk_count += 1;
             }
 
-            // OpenAI-style usage block (sent in final chunk when include_usage).
+            // OpenAI-style usage block (sent in the final chunk when
+            // include_usage is honoured). Some servers emit `usage` with zeros
+            // on intermediate chunks — a zero must not override the chunk
+            // count we observed, or the request would be reported as empty.
             if let Some(c) = data
                 .get("usage")
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|v| v.as_u64())
+                .filter(|c| *c > 0)
             {
-                usage_completion = Some(c);
-            }
-            // Ollama-specific.
-            if let Some(c) = data.get("eval_count").and_then(|v| v.as_u64()) {
                 usage_completion = Some(c);
             }
         }
@@ -594,20 +634,6 @@ fn percentile_f64(sorted: &[f64], p: f64) -> Option<f64> {
     Some(sorted[idx.min(sorted.len() - 1)])
 }
 
-fn dedup_errors(errors: &[String], max: usize) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for e in errors {
-        if seen.insert(e.clone()) {
-            out.push(e.clone());
-            if out.len() >= max {
-                break;
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +712,29 @@ mod tests {
         assert_eq!(s.truncated, 0);
         assert_eq!(s.total_tokens, 0);
         assert_eq!(s.errors, vec!["HTTP 500".to_string()]);
+    }
+
+    #[test]
+    fn record_metric_dedups_and_caps_errors_but_counts_every_failure() {
+        let mut s = RunningStats::default();
+        for i in 0..1000 {
+            record_metric(RequestMetrics::failure(format!("err {}", i % 30)), &mut s);
+        }
+        assert_eq!(s.failed, 1000);
+        assert_eq!(s.errors.len(), MAX_DISTINCT_ERRORS);
+        assert_eq!(s.errors[0], "err 0");
+        assert_eq!(s.errors[MAX_DISTINCT_ERRORS - 1], format!("err {}", MAX_DISTINCT_ERRORS - 1));
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_and_caps() {
+        assert_eq!(backoff_for(0), Duration::ZERO);
+        assert_eq!(backoff_for(1), Duration::from_millis(250));
+        assert_eq!(backoff_for(2), Duration::from_millis(500));
+        assert_eq!(backoff_for(3), Duration::from_millis(1000));
+        assert_eq!(backoff_for(5), Duration::from_millis(4000));
+        assert_eq!(backoff_for(6), BACKOFF_MAX);
+        assert_eq!(backoff_for(40), BACKOFF_MAX, "must not overflow the shift");
     }
 
     #[test]

@@ -399,6 +399,15 @@ export const store = reactive({
   }
 });
 
+// Unique id for history entries. `Date.now()` alone can collide when two
+// entries land in the same millisecond (a fast series + a paired run finishing
+// together), and Comparison keys its selection on these ids.
+function newId() {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 // Persists profiles to localStorage WITHOUT the apiKey (issue #6 — keys live in
 // the encrypted vault, never in plaintext localStorage).
 function persistProfiles() {
@@ -766,18 +775,17 @@ async function executeRun(promptText, config, controller, sink) {
         // 1. Extract content delta
         const content = data.choices?.[0]?.delta?.content || "";
 
-        // 2. Extract metrics if available (e.g. usage statistics)
-        if (data.usage) {
-          sink.promptTokens = data.usage.prompt_tokens;
-          sink.completionTokens = data.usage.completion_tokens;
-          sink.totalTokens = data.usage.total_tokens;
-        }
-
-        // 3. Extract custom engine specifics (e.g., Ollama metadata)
-        if (data.prompt_eval_count || data.eval_count) {
-          sink.promptTokens = data.prompt_eval_count || sink.promptTokens;
-          sink.completionTokens = data.eval_count || sink.completionTokens;
-          sink.totalTokens = (data.prompt_eval_count || 0) + (data.eval_count || 0);
+        // 2. Token usage. OpenAI shape only: we always hit /v1/chat/completions,
+        // and every engine we target (Ollama, LM Studio, vLLM, cloud) reports
+        // `usage` there — Ollama's native `eval_count` fields never appear on
+        // this endpoint. Some servers send `usage` with zeros on intermediate
+        // chunks; only accept positive counts so they can't clobber the final
+        // ones (or, if none arrive, the chunk-count fallback below).
+        const u = data.usage;
+        if (u) {
+          if (u.prompt_tokens > 0) sink.promptTokens = u.prompt_tokens;
+          if (u.completion_tokens > 0) sink.completionTokens = u.completion_tokens;
+          if (u.total_tokens > 0) sink.totalTokens = u.total_tokens;
         }
 
         if (content) {
@@ -806,8 +814,12 @@ async function executeRun(promptText, config, controller, sink) {
       }
     }
 
-    // Done reading stream
-    const finalTime = performance.now();
+    // Done reading stream. Note: metrics are anchored on the *last content
+    // token*, not on stream end — after the last token the server may still
+    // send a usage chunk and `[DONE]`, and that tail is bookkeeping, not
+    // generation. This keeps TPS = N / (last − first), the formula documented
+    // in Metrics & Help and used by the Rust concurrency worker, so numbers
+    // from the Playground and the Concurrency view are directly comparable.
 
     // Prefer the server-reported completion token count for accuracy.
     // The chunk count (tokenCount) is only a fallback: one SSE chunk is not
@@ -826,8 +838,8 @@ async function executeRun(promptText, config, controller, sink) {
         tokensForMetrics > 1
           ? Math.round((lastTokenTime - firstTokenTime) / (tokensForMetrics - 1))
           : null;
-      const totalTimeSecs = (finalTime - firstTokenTime) / 1000;
-      sink.tps = parseFloat((tokensForMetrics / (totalTimeSecs || 0.001)).toFixed(2));
+      const decodeSecs = Math.max((lastTokenTime - firstTokenTime) / 1000, 0.001);
+      sink.tps = parseFloat((tokensForMetrics / decodeSecs).toFixed(2));
 
       // Reconcile the live throughput curve with the finalized TPS. During the
       // stream every curve point was computed from the SSE chunk counter, but
@@ -1025,7 +1037,7 @@ function saveSeriesToHistory(promptText, measured, agg, config, profileName) {
     stat == null ? null : decimals ? parseFloat(stat.median.toFixed(decimals)) : Math.round(stat.median);
 
   const newRun = {
-    id: Date.now().toString(),
+    id: newId(),
     timestamp: new Date().toISOString(),
     configName: profileName,
     modelName: config.model,
@@ -1290,10 +1302,7 @@ function saveConcurrencyToHistory(profile, config) {
   const c = store.concurrency;
   if (!c.result) return;
   store.saveConcurrencyRun({
-    id:
-      (typeof crypto !== "undefined" && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    id: newId(),
     timestamp: new Date().toISOString(),
     profileName: profile.name,
     modelName: config.model,
@@ -1309,7 +1318,7 @@ function saveCotenancyToHistory(configA, configB) {
   const ct = store.cotenancy;
   if (!ct.result) return;
   store.saveCotenancyRun({
-    id: Date.now().toString(),
+    id: newId(),
     timestamp: new Date().toISOString(),
     iterations: ct.iterations,
     warmup: ct.warmup,
