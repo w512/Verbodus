@@ -2,30 +2,62 @@
 import { store } from "../store/store.js";
 import { confirmDialog } from "../store/dialog.js";
 import { theme, toggleTheme } from "../store/theme.js";
-import { ref } from "vue";
+import { ref, computed, nextTick, watch } from "vue";
 
 const newProfileName = ref("");
 const isCreating = ref(false);
+const createError = ref("");
+const nameInput = ref(null);
+
+// Profile list is read-only while any benchmark runs (see store.isBusy()) —
+// switching mid-run would mislabel results or change the endpoint under a
+// running series.
+const isBusy = computed(() => store.isBusy());
+
+// Pick a default name that doesn't collide with an existing profile.
+function suggestName() {
+  const taken = new Set(store.profiles.map((p) => p.name.toLowerCase()));
+  let n = store.profiles.length + 1;
+  while (taken.has(`profile ${n}`)) n++;
+  return `Profile ${n}`;
+}
 
 function triggerCreate() {
+  if (isBusy.value) return;
   isCreating.value = true;
-  newProfileName.value = `Profile ${store.profiles.length + 1}`;
+  createError.value = "";
+  newProfileName.value = suggestName();
+  nextTick(() => nameInput.value?.select());
 }
 
 function confirmCreate() {
-  if (newProfileName.value.trim()) {
-    store.saveProfile(newProfileName.value.trim());
-    store.selectProfile(store.profiles.length - 1);
-    isCreating.value = false;
+  const res = store.createProfile(newProfileName.value);
+  if (!res.ok) {
+    createError.value = res.error;
+    nameInput.value?.focus();
+    return;
   }
+  store.selectProfile(res.index);
+  isCreating.value = false;
+  createError.value = "";
 }
 
 function cancelCreate() {
   isCreating.value = false;
+  createError.value = "";
+}
+
+// Clear a stale validation message as soon as the user edits the name.
+watch(newProfileName, () => { createError.value = ""; });
+
+function pickProfile(idx) {
+  if (isBusy.value) return;
+  store.selectProfile(idx);
 }
 
 async function removeProfile(index, event) {
   event.stopPropagation();
+  if (isBusy.value) return;
   const ok = await confirmDialog({
     title: "Delete profile",
     message: `Delete the profile "${store.profiles[index].name}"?`,
@@ -86,34 +118,48 @@ async function removeProfile(index, event) {
     <div class="profiles-section">
       <div class="section-header">
         <span>API PROFILES</span>
-        <button class="add-btn" @click="triggerCreate" title="Add profile">+</button>
+        <button
+          class="add-btn"
+          @click="triggerCreate"
+          :disabled="isBusy"
+          :title="isBusy ? 'Unavailable while a benchmark is running' : 'Add profile'"
+        >+</button>
       </div>
 
       <div class="profile-creator" v-if="isCreating">
-        <input 
-          v-model="newProfileName" 
-          placeholder="Profile name..." 
+        <input
+          v-model="newProfileName"
+          placeholder="Profile name..."
+          :class="{ invalid: createError }"
+          :aria-invalid="!!createError"
+          aria-describedby="profile-name-error"
           @keyup.enter="confirmCreate"
+          @keyup.esc="cancelCreate"
           ref="nameInput"
         />
+        <p v-if="createError" id="profile-name-error" class="creator-error" role="alert">
+          {{ createError }}
+        </p>
         <div class="creator-actions">
           <button class="btn btn-primary btn-sm" @click="confirmCreate">Save</button>
           <button class="btn btn-secondary btn-sm" @click="cancelCreate">Cancel</button>
         </div>
       </div>
 
-      <ul class="profiles-list scroller">
-        <li 
-          v-for="(prof, idx) in store.profiles" 
+      <ul class="profiles-list scroller" :class="{ locked: isBusy }" :aria-disabled="isBusy">
+        <li
+          v-for="(prof, idx) in store.profiles"
           :key="prof.name"
           :class="{ active: store.activeProfileIndex === idx }"
-          @click="store.selectProfile(idx)"
+          :title="isBusy && store.activeProfileIndex !== idx ? 'Unavailable while a benchmark is running' : undefined"
+          @click="pickProfile(idx)"
         >
           <span class="profile-name">🔌 {{ prof.name }}</span>
-          <button 
+          <button
             v-if="store.profiles.length > 1"
-            class="delete-btn" 
-            @click="removeProfile(idx, $event)" 
+            class="delete-btn"
+            :disabled="isBusy"
+            @click="removeProfile(idx, $event)"
             title="Delete profile"
           >
             ×
@@ -240,6 +286,12 @@ async function removeProfile(index, event) {
   color: var(--accent-cyan);
 }
 
+.add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--text-secondary);
+}
+
 .profile-creator {
   background: var(--surface-1);
   border: 1px solid var(--border-color);
@@ -252,6 +304,17 @@ async function removeProfile(index, event) {
   padding: 6px 10px;
   font-size: 12px;
   margin-bottom: 8px;
+}
+
+.profile-creator input.invalid {
+  border-color: var(--color-danger);
+}
+
+.creator-error {
+  font-size: 11px;
+  color: var(--color-danger);
+  margin: -4px 2px 8px;
+  line-height: 1.4;
 }
 
 .creator-actions {
@@ -292,6 +355,19 @@ async function removeProfile(index, event) {
   color: var(--text-primary);
 }
 
+/* While a benchmark runs the list is read-only: keep the active row legible,
+   dim the rest and drop the pointer affordance. */
+.profiles-list.locked li {
+  cursor: not-allowed;
+}
+.profiles-list.locked li:not(.active) {
+  opacity: 0.5;
+}
+.profiles-list.locked li:not(.active):hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
 .profiles-list li.active {
   background: var(--surface-2);
   border: 1px solid var(--border-color);
@@ -322,6 +398,12 @@ async function removeProfile(index, event) {
 
 .delete-btn:hover {
   color: var(--color-danger);
+}
+
+.delete-btn:disabled,
+.profiles-list li:hover .delete-btn:disabled {
+  opacity: 0;
+  cursor: not-allowed;
 }
 
 .footer {

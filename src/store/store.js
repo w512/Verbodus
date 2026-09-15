@@ -185,8 +185,23 @@ export const store = reactive({
   // Concurrency session history (persisted).
   concurrencyRuns: initialConcurrencyRuns,
 
+  // True while any benchmark is in flight. Profile mutations are refused in
+  // this state: the Playground series reads its config once at start, but the
+  // Co-Tenancy / Concurrency views resolve profiles by index for their live
+  // panels, and the history entry is attributed by profile name — switching or
+  // deleting profiles mid-run would mislabel results.
+  isBusy() {
+    return (
+      this.activeRun.status === "running" ||
+      this.cotenancy.status === "running" ||
+      this.concurrency.status === "running"
+    );
+  },
+
   // Actions
   selectProfile(index) {
+    if (this.isBusy()) return;
+    if (!this.profiles[index]) return;
     this.activeProfileIndex = index;
     this.config = withBenchDefaults(this.profiles[index]);
     // Model list is endpoint-specific — drop it so it isn't shown for a
@@ -196,16 +211,22 @@ export const store = reactive({
     this.models.error = "";
   },
 
-  saveProfile(name) {
-    const existingIndex = this.profiles.findIndex(p => p.name === name);
-    const newProfile = { ...this.config, name };
-    if (existingIndex >= 0) {
-      this.profiles[existingIndex] = newProfile;
-    } else {
-      this.profiles.push(newProfile);
-    }
+  // Creates a new profile from the current form values. Names must be unique
+  // (case-insensitively — they double as the vault key for the API key, and
+  // two visually identical entries in the sidebar would be indistinguishable).
+  // Returns { ok: true, index } or { ok: false, error }. Does not select it;
+  // the caller decides (the sidebar does, to keep UI flow in one place).
+  createProfile(rawName) {
+    if (this.isBusy()) return { ok: false, error: "Wait for the running benchmark to finish." };
+    const name = (rawName || "").trim();
+    if (!name) return { ok: false, error: "Profile name is required." };
+    const clash = this.profiles.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    if (clash) return { ok: false, error: `A profile named "${clash.name}" already exists.` };
+
+    this.profiles.push({ ...this.config, name });
     persistProfiles();
     setApiKey(name, this.config.apiKey || ""); // key goes to the vault, not localStorage
+    return { ok: true, index: this.profiles.length - 1 };
   },
 
   // Persists the current form edits back into the active profile. Called by the
@@ -221,7 +242,9 @@ export const store = reactive({
   },
 
   deleteProfile(index) {
+    if (this.isBusy()) return;
     if (this.profiles.length <= 1) return;
+    if (!this.profiles[index]) return;
     const name = this.profiles[index].name;
     this.profiles.splice(index, 1);
     this.activeProfileIndex = Math.min(this.activeProfileIndex, this.profiles.length - 1);
@@ -755,8 +778,17 @@ export async function runBenchmark(promptText) {
   store.activeRun.status = "running";
   store.activeRun.prompt = promptText;
 
-  const iterations = Math.max(1, parseInt(store.config.iterations) || 1);
-  const warmup = Math.max(0, parseInt(store.config.warmup) || 0);
+  // Snapshot the config and the profile it belongs to. Every iteration of the
+  // series must hit the same endpoint with the same parameters, and the history
+  // entry must be attributed to the profile that was active when the run
+  // started — not to whatever is selected by the time it finishes. (Profile
+  // switching is also blocked while busy, see `store.isBusy()`; this is the
+  // belt to that suspenders.)
+  const config = { ...store.config };
+  const profileName = store.profiles[store.activeProfileIndex]?.name ?? "";
+
+  const iterations = Math.max(1, parseInt(config.iterations) || 1);
+  const warmup = Math.max(0, parseInt(config.warmup) || 0);
   const total = iterations + warmup;
 
   // Shared controller so a single cancel/timeout aborts the whole series.
@@ -774,7 +806,7 @@ export async function runBenchmark(promptText) {
   try {
     for (let i = 0; i < total; i++) {
       store.series.current = i + 1;
-      const result = await executeRun(promptText, store.config, controller, store.activeRun);
+      const result = await executeRun(promptText, config, controller, store.activeRun);
       if (i >= warmup) {
         measured.push(result);
         store.series.kept = measured.length;
@@ -784,7 +816,7 @@ export async function runBenchmark(promptText) {
     store.series.agg = aggregate(measured);
     store.series.status = "completed";
     store.activeRun.status = "completed";
-    saveSeriesToHistory(promptText, measured, store.series.agg);
+    saveSeriesToHistory(promptText, measured, store.series.agg, config, profileName);
   } catch (err) {
     const reason = controller.signal.reason;
     if (reason === "user") {
@@ -871,8 +903,9 @@ function aggregate(runs) {
 
 // Saves one aggregated entry per series. The displayed ttft/tpot/tps use the
 // median (so the Comparison view contrasts medians); the response text and
-// throughput curve come from the last measured run.
-function saveSeriesToHistory(promptText, measured, agg) {
+// throughput curve come from the last measured run. `config`/`profileName`
+// are the snapshot taken when the series started (see runBenchmark).
+function saveSeriesToHistory(promptText, measured, agg, config, profileName) {
   if (measured.length === 0) return;
   const last = measured[measured.length - 1];
   const medianOf = (stat, decimals) =>
@@ -881,9 +914,9 @@ function saveSeriesToHistory(promptText, measured, agg) {
   const newRun = {
     id: Date.now().toString(),
     timestamp: new Date().toISOString(),
-    configName: store.profiles[store.activeProfileIndex].name,
-    modelName: store.config.model,
-    url: store.config.url,
+    configName: profileName,
+    modelName: config.model,
+    url: config.url,
     prompt: promptText,
     responseText: last.responseText,
     ttft: medianOf(agg.ttft, 0),
