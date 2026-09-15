@@ -100,6 +100,8 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKeydown));
   font-size: 14px;
   line-height: 1.55;
   color: var(--text-secondary);
+  white-space: pre-line; /* honour explicit \n in messages (e.g. file paths) */
+  overflow-wrap: anywhere;
 }
 
 .modal-actions {

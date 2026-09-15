@@ -1,8 +1,10 @@
 mod concurrency;
+mod vault;
 
 use concurrency::{
     cancel_concurrency_benchmark, run_concurrency_benchmark, ConcurrencyState,
 };
+use vault::backup_vault;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -38,7 +40,8 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             run_concurrency_benchmark,
-            cancel_concurrency_benchmark
+            cancel_concurrency_benchmark,
+            backup_vault
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

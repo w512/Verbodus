@@ -10,14 +10,16 @@
 // to initialise for any reason, we fall back to an in-memory cache for the
 // session so the app keeps working rather than losing the key outright.
 
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { alertDialog } from "./dialog.js";
 
 const CLIENT = "verbodus";
+const VAULT_FILE = "verbodus.vault"; // must match VAULT_FILE in src-tauri/src/vault.rs
 const recordKey = (profileName) => `apikey:${profileName}`;
 const webKey = (profileName) => `verbodus_apikey:${profileName}`;
 
 const memCache = {}; // session fallback when the vault is unavailable
-let vaultPromise = null; // memoised init
+let vaultPromise = null; // memoised init (reset on failure so callers can retry)
 
 // NOTE: the vault password is random per install but stored locally, so an app
 // that unlocks itself (no login) can always be unlocked by anyone with local
@@ -33,22 +35,52 @@ function getVaultPassword() {
   return pwd;
 }
 
+async function openVault(Stronghold, vaultPath) {
+  const stronghold = await Stronghold.load(vaultPath, getVaultPassword());
+  let client;
+  try {
+    client = await stronghold.loadClient(CLIENT);
+  } catch {
+    client = await stronghold.createClient(CLIENT);
+  }
+  return { stronghold, store: client.getStore() };
+}
+
 async function initVault() {
   if (vaultPromise) return vaultPromise;
   vaultPromise = (async () => {
     const { Stronghold } = await import("@tauri-apps/plugin-stronghold");
     const { appDataDir, join } = await import("@tauri-apps/api/path");
-    const vaultPath = await join(await appDataDir(), "verbodus.vault");
-    const stronghold = await Stronghold.load(vaultPath, getVaultPassword());
+    const vaultPath = await join(await appDataDir(), VAULT_FILE);
 
-    let client;
     try {
-      client = await stronghold.loadClient(CLIENT);
-    } catch {
-      client = await stronghold.createClient(CLIENT);
+      return await openVault(Stronghold, vaultPath);
+    } catch (loadErr) {
+      // Most likely cause: the snapshot exists but our password no longer
+      // matches it (WebView storage was cleared/migrated, so a new random
+      // password was generated above). Without intervention every vault call
+      // would fail for the rest of the install's life. Move the unreadable
+      // snapshot aside (kept as a timestamped .bak — never deleted) and start
+      // a fresh vault. The stored keys are gone from the app's point of view;
+      // tell the user so they know to re-enter them rather than hunting a
+      // silent 401.
+      console.error("Vault failed to open; moving it aside and recreating:", loadErr);
+      const backupPath = await invoke("backup_vault");
+      const fresh = await openVault(Stronghold, vaultPath);
+      alertDialog({
+        title: "API key vault was reset",
+        message:
+          "The encrypted vault holding your API keys could not be opened (its password no longer matches). " +
+          "A new empty vault was created; the old file was kept" +
+          (backupPath ? ` at:\n${backupPath}` : ".") +
+          "\n\nPlease re-enter the API keys in your profiles.",
+      });
+      return fresh;
     }
-    return { stronghold, store: client.getStore() };
   })();
+  // A rejected promise must not be memoised: the next get/set should retry
+  // rather than inherit a permanent failure from one bad moment.
+  vaultPromise.catch(() => { vaultPromise = null; });
   return vaultPromise;
 }
 
