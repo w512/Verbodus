@@ -1,6 +1,11 @@
 <script setup>
-import { watch, onBeforeUnmount } from "vue";
+import { ref, watch, nextTick, onBeforeUnmount } from "vue";
 import { dialogState, resolveDialog } from "../store/dialog.js";
+
+const cardRef = ref(null);
+const cancelBtn = ref(null);
+const confirmBtn = ref(null);
+let previouslyFocused = null; // element to give focus back to on close
 
 function confirm() {
   resolveDialog(true);
@@ -10,23 +15,56 @@ function cancel() {
   resolveDialog(false);
 }
 
-// Keyboard: Enter confirms, Escape cancels — only while a dialog is open.
+// Keyboard handling while a dialog is open:
+//   Escape — cancel.
+//   Enter  — activates the *focused* button (native behaviour) rather than
+//            always confirming. For danger dialogs focus starts on Cancel, so a
+//            reflexive Enter can no longer delete something; for the rest it
+//            starts on Confirm, so Enter still means "OK".
+//   Tab    — kept inside the dialog (the page behind is aria-hidden by
+//            aria-modal, but focus would otherwise still escape to it).
 function onKeydown(e) {
   if (!dialogState.open) return;
   if (e.key === "Escape") {
     e.preventDefault();
     cancel();
-  } else if (e.key === "Enter") {
-    e.preventDefault();
-    confirm();
+    return;
+  }
+  if (e.key === "Tab") {
+    const focusables = cardRef.value?.querySelectorAll("button:not([disabled])");
+    if (!focusables?.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    } else if (!cardRef.value.contains(document.activeElement)) {
+      e.preventDefault();
+      first.focus();
+    }
   }
 }
 
 watch(
   () => dialogState.open,
-  (open) => {
-    if (open) document.addEventListener("keydown", onKeydown);
-    else document.removeEventListener("keydown", onKeydown);
+  async (open) => {
+    if (open) {
+      previouslyFocused = document.activeElement;
+      document.addEventListener("keydown", onKeydown);
+      await nextTick();
+      const target =
+        dialogState.kind === "confirm" && dialogState.danger ? cancelBtn.value : confirmBtn.value;
+      (target || confirmBtn.value)?.focus();
+    } else {
+      document.removeEventListener("keydown", onKeydown);
+      if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+        previouslyFocused.focus();
+      }
+      previouslyFocused = null;
+    }
   }
 );
 
@@ -41,19 +79,28 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKeydown));
         class="modal-overlay"
         @mousedown.self="cancel"
       >
-        <div class="modal-card glass-panel" role="dialog" aria-modal="true">
-          <h3 v-if="dialogState.title" class="modal-title">{{ dialogState.title }}</h3>
-          <p class="modal-message">{{ dialogState.message }}</p>
+        <div
+          ref="cardRef"
+          class="modal-card glass-panel"
+          role="dialog"
+          aria-modal="true"
+          :aria-labelledby="dialogState.title ? 'modal-title' : undefined"
+          aria-describedby="modal-message"
+        >
+          <h3 v-if="dialogState.title" id="modal-title" class="modal-title">{{ dialogState.title }}</h3>
+          <p id="modal-message" class="modal-message">{{ dialogState.message }}</p>
 
           <div class="modal-actions">
             <button
               v-if="dialogState.kind === 'confirm'"
+              ref="cancelBtn"
               class="btn btn-secondary"
               @click="cancel"
             >
               {{ dialogState.cancelText }}
             </button>
             <button
+              ref="confirmBtn"
               class="btn"
               :class="dialogState.danger ? 'btn-danger' : 'btn-primary'"
               @click="confirm"

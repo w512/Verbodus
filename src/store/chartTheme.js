@@ -46,11 +46,17 @@ export const CHART_COLORS = {
 export const CHART_FONT = { family: "Inter", size: 11 };
 
 // Shared tooltip styling (spread it, then add per-chart callbacks if needed).
+// Colours are *scriptable* (functions), which Chart.js evaluates each time the
+// tooltip is drawn — so the tooltip follows a theme toggle live, without the
+// charts having to be re-created. Axis/grid colours above stay static neutral
+// greys that read on both backgrounds.
+const isLight = () => document.documentElement.getAttribute("data-theme") === "light";
+
 export const tooltipTheme = {
-  backgroundColor: "rgba(11, 15, 25, 0.9)",
-  titleColor: "#9CA3AF",
-  bodyColor: "#F3F4F6",
-  borderColor: "rgba(255, 255, 255, 0.08)",
+  backgroundColor: () => (isLight() ? "rgba(255, 255, 255, 0.96)" : "rgba(11, 15, 25, 0.9)"),
+  titleColor: () => (isLight() ? "#475569" : "#9CA3AF"),
+  bodyColor: () => (isLight() ? "#1E293B" : "#F3F4F6"),
+  borderColor: () => (isLight() ? "rgba(15, 23, 42, 0.12)" : "rgba(255, 255, 255, 0.08)"),
   borderWidth: 1,
   displayColors: false,
 };

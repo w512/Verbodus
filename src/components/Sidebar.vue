@@ -2,7 +2,20 @@
 import { store } from "../store/store.js";
 import { confirmDialog } from "../store/dialog.js";
 import { theme, toggleTheme } from "../store/theme.js";
+import { isTauri } from "@tauri-apps/api/core";
 import { ref, computed, nextTick, watch } from "vue";
+
+// Which rendering engine the benchmark UI runs in. Tauri uses the OS WebView:
+// WKWebView on macOS, WebView2 (Chromium) on Windows, WebKitGTK on Linux. In
+// the `bun dev` preview it is whatever browser the user opened.
+const engineLabel = (() => {
+  const ua = navigator.userAgent;
+  if (!isTauri()) return "Browser preview (no Tauri)";
+  if (/Macintosh|Mac OS X/.test(ua)) return "Native WKWebView (macOS)";
+  if (/Windows/.test(ua)) return "Native WebView2 (Windows)";
+  if (/Linux/.test(ua)) return "Native WebKitGTK (Linux)";
+  return "Native WebView";
+})();
 
 const newProfileName = ref("");
 const isCreating = ref(false);
@@ -175,7 +188,7 @@ async function removeProfile(index, event) {
         <span class="theme-hint">Switch</span>
       </button>
       <p class="status-indicator">
-        <span class="dot pulse"></span> Web Engine: Native Safari WebView
+        <span class="dot pulse"></span> Web Engine: {{ engineLabel }}
       </p>
     </div>
   </aside>
