@@ -1,9 +1,17 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { store, fetchModels } from "../store/store.js";
 
 const modelOpen = ref(false);
 const modelWrap = ref(null);
+const modelInput = ref(null);
+const modelListEl = ref(null);
+const activeIndex = ref(-1); // keyboard-highlighted index in the dropdown
+
+// All form controls are locked while a benchmark is running — changing the
+// endpoint / model / sampling mid-stream would invalidate the in-flight run's
+// measurements (and a series uses the current `store.config` per iteration).
+const isRunning = computed(() => store.activeRun.status === "running");
 
 // Filter the fetched catalogue by whatever is currently typed (combobox).
 const filteredModels = computed(() => {
@@ -24,9 +32,64 @@ function selectModel(m) {
   modelOpen.value = false;
 }
 
+function clearModel() {
+  store.config.model = "";
+  // Return focus so the user can immediately type or pick from the dropdown.
+  modelInput.value?.focus();
+  if (store.models.list.length) modelOpen.value = true;
+}
+
 function onModelFocus() {
   if (store.models.list.length) modelOpen.value = true;
 }
+
+// Keyboard navigation for the combobox: ↓ opens / moves down, ↑ moves up,
+// Enter confirms the highlighted option, Esc closes.
+function onModelKeydown(e) {
+  if (isRunning.value) return;
+  const items = filteredModels.value;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (!modelOpen.value && items.length) {
+      modelOpen.value = true;
+      activeIndex.value = 0;
+    } else if (items.length) {
+      activeIndex.value = Math.min(activeIndex.value + 1, items.length - 1);
+    }
+    scrollActiveIntoView();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (modelOpen.value && items.length) {
+      activeIndex.value = Math.max(activeIndex.value - 1, 0);
+      scrollActiveIntoView();
+    }
+  } else if (e.key === "Enter") {
+    if (modelOpen.value && activeIndex.value >= 0 && items[activeIndex.value]) {
+      e.preventDefault();
+      selectModel(items[activeIndex.value]);
+    }
+  } else if (e.key === "Escape") {
+    if (modelOpen.value) {
+      e.preventDefault();
+      modelOpen.value = false;
+    }
+  }
+}
+
+function scrollActiveIntoView() {
+  // Defer so the rendered <li> with .highlighted is in the DOM before scrolling.
+  requestAnimationFrame(() => {
+    const ul = modelListEl.value;
+    if (!ul) return;
+    const li = ul.querySelector("li.highlighted");
+    if (li) li.scrollIntoView({ block: "nearest" });
+  });
+}
+
+// Reset highlight whenever the dropdown opens or the filter changes.
+watch([modelOpen, filteredModels], () => {
+  activeIndex.value = modelOpen.value && filteredModels.value.length ? 0 : -1;
+});
 
 function handleClickOutside(e) {
   if (modelWrap.value && !modelWrap.value.contains(e.target)) {
@@ -52,21 +115,23 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
         
         <div class="form-row">
           <label for="api-url">Base API Endpoint</label>
-          <input 
-            id="api-url" 
-            v-model="store.config.url" 
-            type="url" 
-            placeholder="http://localhost:11434/v1" 
+          <input
+            id="api-url"
+            v-model="store.config.url"
+            type="url"
+            placeholder="http://localhost:11434/v1"
+            :disabled="isRunning"
           />
         </div>
 
         <div class="form-row">
           <label for="api-key">API Key (Optional)</label>
-          <input 
-            id="api-key" 
-            v-model="store.config.apiKey" 
-            type="password" 
-            placeholder="••••••••••••••••" 
+          <input
+            id="api-key"
+            v-model="store.config.apiKey"
+            type="password"
+            placeholder="••••••••••••••••"
+            :disabled="isRunning"
           />
         </div>
 
@@ -75,16 +140,35 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
           <div class="model-combobox" ref="modelWrap">
             <input
               id="api-model"
+              ref="modelInput"
               v-model="store.config.model"
               type="text"
               placeholder="e.g. llama3, mixtral"
               autocomplete="off"
+              role="combobox"
+              aria-controls="model-listbox"
+              aria-autocomplete="list"
+              :aria-expanded="modelOpen && filteredModels.length > 0 && !isRunning"
+              :aria-activedescendant="activeIndex >= 0 ? `model-opt-${activeIndex}` : undefined"
+              :disabled="isRunning"
               @focus="onModelFocus"
+              @keydown="onModelKeydown"
             />
+            <button
+              v-if="store.config.model"
+              class="model-clear-btn"
+              type="button"
+              title="Clear model name"
+              aria-label="Clear model name"
+              :disabled="isRunning"
+              @click="clearModel"
+            >
+              ×
+            </button>
             <button
               class="model-fetch-btn"
               type="button"
-              :disabled="store.models.status === 'loading'"
+              :disabled="isRunning || store.models.status === 'loading'"
               title="Fetch available models from the endpoint"
               @click="loadModels"
             >
@@ -93,14 +177,21 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
             </button>
 
             <ul
-              v-if="modelOpen && filteredModels.length"
+              v-if="modelOpen && filteredModels.length && !isRunning"
+              id="model-listbox"
+              ref="modelListEl"
               class="model-dropdown scroller"
+              role="listbox"
             >
               <li
-                v-for="m in filteredModels"
+                v-for="(m, idx) in filteredModels"
                 :key="m"
-                :class="{ active: m === store.config.model }"
+                :id="`model-opt-${idx}`"
+                role="option"
+                :aria-selected="m === store.config.model"
+                :class="{ active: m === store.config.model, highlighted: idx === activeIndex }"
                 @mousedown.prevent="selectModel(m)"
+                @mousemove="activeIndex = idx"
               >
                 {{ m }}
               </li>
@@ -126,14 +217,15 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
           <div class="slider-header">
             <label for="temp">Temperature: {{ store.config.temperature }}</label>
           </div>
-          <input 
-            id="temp" 
-            v-model.number="store.config.temperature" 
-            type="range" 
-            min="0" 
-            max="2" 
-            step="0.1" 
+          <input
+            id="temp"
+            v-model.number="store.config.temperature"
+            type="range"
+            min="0"
+            max="2"
+            step="0.1"
             class="slider"
+            :disabled="isRunning"
           />
         </div>
 
@@ -145,6 +237,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
             type="number"
             min="1"
             max="8192"
+            :disabled="isRunning"
           />
         </div>
 
@@ -157,6 +250,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
               type="number"
               min="1"
               max="100"
+              :disabled="isRunning"
             />
           </div>
           <div>
@@ -167,6 +261,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
               type="number"
               min="0"
               max="20"
+              :disabled="isRunning"
             />
           </div>
         </div>
@@ -175,7 +270,12 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
         <div class="form-row flex-row">
           <label for="stream-toggle">Enable Token Streaming</label>
           <label class="switch">
-            <input id="stream-toggle" type="checkbox" v-model="store.config.stream" />
+            <input
+              id="stream-toggle"
+              type="checkbox"
+              v-model="store.config.stream"
+              :disabled="isRunning"
+            />
             <span class="slider-switch"></span>
           </label>
         </div>
@@ -191,17 +291,9 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
             v-model="store.config.systemPrompt"
             rows="3"
             placeholder="Define the behavior of the model..."
+            :disabled="isRunning"
           ></textarea>
         </div>
-      </div>
-    </div>
-
-    <!-- Unsaved-changes footer (issue #7) -->
-    <div class="panel-footer" v-if="store.isDirty()">
-      <span class="dirty-note">● Unsaved changes</span>
-      <div class="footer-actions">
-        <button class="btn btn-secondary btn-sm" @click="store.revertActiveProfile()">Revert</button>
-        <button class="btn btn-primary btn-sm" @click="store.saveActiveProfile()">Save to profile</button>
       </div>
     </div>
   </div>
@@ -244,35 +336,6 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
   min-height: 0;
 }
 
-.panel-footer {
-  flex-shrink: 0;
-  padding: 14px 24px;
-  border-top: 1px solid var(--border-color);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  background: rgba(245, 158, 11, 0.04);
-}
-
-.dirty-note {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-warning);
-  white-space: nowrap;
-}
-
-.footer-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.btn-sm {
-  padding: 6px 12px;
-  font-size: 12px;
-  border-radius: 6px;
-}
-
 .settings-group {
   display: flex;
   flex-direction: column;
@@ -304,28 +367,40 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
 }
 
 .model-combobox input {
-  padding-right: 38px; /* room for the fetch button */
+  padding-right: 66px; /* room for the clear (×) + fetch (↻) buttons */
 }
 
-.model-fetch-btn {
+.model-fetch-btn,
+.model-clear-btn {
   position: absolute;
   top: 0;
-  right: 0;
   height: 100%;
-  width: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: 0 8px 8px 0;
   color: var(--text-secondary);
-  font-size: 15px;
   cursor: pointer;
   transition: color 0.2s;
 }
 
-.model-fetch-btn:hover:not(:disabled) {
+.model-fetch-btn {
+  right: 0;
+  width: 36px;
+  border-radius: 0 8px 8px 0;
+  font-size: 15px;
+}
+
+.model-clear-btn {
+  right: 32px;
+  width: 28px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.model-fetch-btn:hover:not(:disabled),
+.model-clear-btn:hover {
   color: var(--accent-cyan);
 }
 
@@ -362,7 +437,8 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
   transition: background 0.15s, color 0.15s;
 }
 
-.model-dropdown li:hover {
+.model-dropdown li:hover,
+.model-dropdown li.highlighted {
   background: var(--surface-3);
   color: var(--text-primary);
 }
@@ -370,6 +446,10 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", handleClickOutsi
 .model-dropdown li.active {
   background: rgba(99, 102, 241, 0.2);
   color: var(--text-primary);
+}
+
+.model-dropdown li.active.highlighted {
+  background: rgba(99, 102, 241, 0.3);
 }
 
 .model-status {

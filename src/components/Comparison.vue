@@ -85,7 +85,15 @@ function initChart() {
           backgroundColor: "rgba(99, 102, 241, 0.75)",
           borderColor: CHART_COLORS.indigo,
           borderWidth: 1,
-          yAxisID: "y-ttft"
+          yAxisID: "y-latency"
+        },
+        {
+          label: "TPOT (ms - Lower is Better)",
+          data: [],
+          backgroundColor: "rgba(168, 85, 247, 0.75)",
+          borderColor: "#a855f7",
+          borderWidth: 1,
+          yAxisID: "y-latency"
         },
         {
           label: "Avg Speed (TPS - Higher is Better)",
@@ -116,13 +124,13 @@ function initChart() {
           grid: { color: CHART_COLORS.gridFaint },
           ticks: { color: CHART_COLORS.axisTitle, font: { ...CHART_FONT, size: 10 } }
         },
-        "y-ttft": {
+        "y-latency": {
           type: "linear",
           position: "left",
           title: {
             display: true,
-            text: "TTFT (ms)",
-            color: CHART_COLORS.indigo,
+            text: "Latency (ms) — TTFT & TPOT",
+            color: CHART_COLORS.axisTitle,
             font: { ...CHART_FONT, size: 10 }
           },
           grid: { color: CHART_COLORS.gridFaint },
@@ -155,18 +163,19 @@ watch(
 
     if (runs.length === 0) {
       chartInstance.data.labels = [];
-      chartInstance.data.datasets[0].data = [];
-      chartInstance.data.datasets[1].data = [];
+      chartInstance.data.datasets.forEach((ds) => (ds.data = []));
       chartInstance.update();
       return;
     }
 
     // Set labels as "Model name (Profile)"
     chartInstance.data.labels = runs.map(r => `${r.modelName.substring(0, 10)}.. (${r.configName})`);
-    
-    // Set datasets
-    chartInstance.data.datasets[0].data = runs.map(r => r.ttft);
-    chartInstance.data.datasets[1].data = runs.map(r => r.tps);
+
+    // Set datasets — null (vs 0) makes Chart.js skip the bar rather than draw a
+    // misleading flat baseline (e.g. TTFT/TPOT are null in non-streaming mode).
+    chartInstance.data.datasets[0].data = runs.map(r => r.ttft ?? null);
+    chartInstance.data.datasets[1].data = runs.map(r => r.tpot ?? null);
+    chartInstance.data.datasets[2].data = runs.map(r => r.tps ?? null);
 
     chartInstance.update();
   },
@@ -205,14 +214,20 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="runs-list scroller" v-if="store.runs.length > 0">
-            <div 
-              v-for="run in store.runs" 
+            <div
+              v-for="run in store.runs"
               :key="run.id"
               class="run-row"
               :class="{ selected: selectedRunIds.includes(run.id) }"
+              role="checkbox"
+              tabindex="0"
+              :aria-checked="selectedRunIds.includes(run.id)"
+              :aria-label="`Compare run: ${run.modelName} on ${run.configName}, ${run.tps} tps`"
               @click="toggleSelection(run.id)"
+              @keydown.enter.prevent="toggleSelection(run.id)"
+              @keydown.space.prevent="toggleSelection(run.id)"
             >
-              <div class="selection-indicator">
+              <div class="selection-indicator" aria-hidden="true">
                 <div class="checkbox" :class="{ checked: selectedRunIds.includes(run.id) }"></div>
               </div>
               <div class="run-info">
@@ -228,7 +243,14 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="run-date">{{ formatDate(run.timestamp) }}</div>
               </div>
-              <button class="delete-row-btn" @click="deleteRun(run.id, $event)">×</button>
+              <button
+                class="delete-row-btn"
+                type="button"
+                aria-label="Delete run"
+                @click="deleteRun(run.id, $event)"
+                @keydown.enter.stop
+                @keydown.space.stop
+              >×</button>
             </div>
           </div>
           <div class="empty-state" v-else>
@@ -380,6 +402,11 @@ onBeforeUnmount(() => {
 .run-row:hover {
   background: var(--surface-2);
   border-color: var(--border-color-hover);
+}
+
+.run-row:focus-visible {
+  outline: 2px solid var(--accent-indigo);
+  outline-offset: -2px;
 }
 
 .run-row.selected {

@@ -2,11 +2,25 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { store, runBenchmark, cancelBenchmark } from "../store/store.js";
 import { ttftClass, tpotClass, tpsClass } from "../store/metrics.js";
+import { renderMarkdown } from "../store/markdown.js";
 import ConfigPanel from "./ConfigPanel.vue";
 import SpeedChart from "./SpeedChart.vue";
 
 const promptText = ref("Explain quantum computing in three clear sentences.");
 const responseContainer = ref(null);
+// True while the user is parked at (or near) the bottom of the response box.
+// While true, every new stream chunk pins the view to the bottom; if the user
+// scrolls up to read earlier content, auto-scroll yields until they return.
+const followBottom = ref(true);
+// "At bottom" is fuzzy: scrollbar overshoot, fractional pixels, and the
+// blinking caret all push the geometry around. 24 px is a safe margin.
+const BOTTOM_THRESHOLD = 24;
+
+function onResponseScroll() {
+  const el = responseContainer.value;
+  if (!el) return;
+  followBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_THRESHOLD;
+}
 
 const QUICK_PROMPTS = [
   { label: "Quantum Intro", text: "Explain quantum computing in three clear sentences." },
@@ -24,16 +38,25 @@ async function startTest() {
   await runBenchmark(promptText.value.trim());
 }
 
-// Auto-scroll response panel to the bottom during generation
+// Auto-scroll response panel to the bottom during generation — but only if
+// the user is already at (near) the bottom. Manual scroll-up disengages until
+// they scroll back down.
 watch(
   () => store.activeRun.responseText,
   () => {
+    if (!followBottom.value) return;
     nextTick(() => {
-      if (responseContainer.value) {
-        responseContainer.value.scrollTop = responseContainer.value.scrollHeight;
-      }
+      const el = responseContainer.value;
+      if (el) el.scrollTop = el.scrollHeight;
     });
   }
+);
+
+// Each new run starts following again — otherwise after one "user scrolled
+// up" session every subsequent run would also refuse to track.
+watch(
+  () => store.activeRun.status,
+  (s) => { if (s === "running") followBottom.value = true; }
 );
 
 // Performance color bands come from the shared src/store/metrics.js helpers
@@ -66,6 +89,12 @@ function metricView(metric, liveVal, unit) {
 const ttftView = computed(() => metricView("ttft", store.activeRun.ttft, "ms"));
 const tpotView = computed(() => metricView("tpot", store.activeRun.tpot, "ms"));
 const tpsView = computed(() => metricView("tps", store.activeRun.tps, "tps"));
+
+// LLM responses often contain markdown (code fences, lists, headings); rendering
+// them as plain <pre> hides that structure. Partial markdown during a stream may
+// look a bit raw (unclosed code fence renders as literal until ``` arrives) —
+// acceptable, the final render is what the user reads.
+const responseHtml = computed(() => renderMarkdown(store.activeRun.responseText));
 </script>
 
 <template>
@@ -140,12 +169,16 @@ const tpsView = computed(() => metricView("tps", store.activeRun.tps, "tps"));
               <span v-else-if="store.activeRun.status === 'cancelled'" class="status-pill cancelled">CANCELLED</span>
               <span v-else-if="store.activeRun.status === 'error'" class="status-pill error">ERROR</span>
             </div>
-            <div 
+            <div
               ref="responseContainer"
               class="response-box scroller"
               :class="{ placeholder: !store.activeRun.responseText && store.activeRun.status === 'idle' }"
+              @scroll.passive="onResponseScroll"
             >
-              <pre v-if="store.activeRun.responseText">{{ store.activeRun.responseText }}<span v-if="store.activeRun.status === 'running'" class="caret"></span></pre>
+              <template v-if="store.activeRun.responseText">
+                <div class="markdown" v-html="responseHtml"></div>
+                <span v-if="store.activeRun.status === 'running'" class="caret"></span>
+              </template>
               <p v-else-if="store.activeRun.status === 'running'" class="loading-text">Starting generation...</p>
               <p v-else-if="store.activeRun.status === 'error'" class="error-text">{{ store.activeRun.error }}</p>
               <p v-else>The engine response will render here in real time...</p>
@@ -377,11 +410,10 @@ textarea {
   font-style: italic;
 }
 
-.response-box pre {
-  white-space: pre-wrap;
-  word-wrap: break-word;
+.response-box :deep(.markdown) {
   color: var(--text-primary);
   user-select: text;
+  word-wrap: break-word;
 }
 
 .caret {

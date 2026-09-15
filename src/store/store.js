@@ -1,6 +1,6 @@
-import { reactive } from "vue";
+import { reactive, watch } from "vue";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import { isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { getApiKey, setApiKey, deleteApiKey } from "./secrets.js";
 
 // Issue #5: route HTTP through the Rust stack when running inside Tauri. This
@@ -14,13 +14,18 @@ const httpFetch = isTauri() ? tauriFetch : globalThis.fetch.bind(globalThis);
 // timeout, since legitimate long generations keep streaming.
 const STALL_TIMEOUT_MS = 60000;
 
-// Tracks the in-flight request so it can be cancelled (issue #4).
+// Tracks the in-flight single-run benchmark so it can be cancelled (issue #4).
+// Co-tenancy uses its own controllers (see `cotenancyControllers` below).
+// Abort cause is read off `controller.signal.reason`, set when we call
+// `controller.abort(reason)` ('user' | 'timeout' | 'peer-failed').
 let activeController = null;
-let abortKind = null; // 'user' | 'timeout' | null
+let cotenancyControllers = null; // { A, B } during a paired run
 
 // History caps to keep localStorage from overflowing its ~5 MB quota (issue #8).
 const MAX_RUNS = 50;          // newest runs kept in history
 const MAX_CURVE_POINTS = 80;  // throughput-curve points stored per run
+const MAX_COTENANCY_RUNS = 20; // newest co-tenancy sessions kept in history
+const MAX_CONCURRENCY_RUNS = 20; // newest concurrency sessions kept in history
 
 // Default configuration presets
 const DEFAULT_PRESETS = [
@@ -74,9 +79,15 @@ const initialProfiles = storedProfiles ? JSON.parse(storedProfiles) : DEFAULT_PR
 const storedRuns = localStorage.getItem("speedometer_runs");
 const initialRuns = storedRuns ? JSON.parse(storedRuns) : [];
 
+const storedCotenancyRuns = localStorage.getItem("speedometer_cotenancy_runs");
+const initialCotenancyRuns = storedCotenancyRuns ? JSON.parse(storedCotenancyRuns) : [];
+
+const storedConcurrencyRuns = localStorage.getItem("speedometer_concurrency_runs");
+const initialConcurrencyRuns = storedConcurrencyRuns ? JSON.parse(storedConcurrencyRuns) : [];
+
 export const store = reactive({
   // Navigation & Views
-  currentView: "playground", // 'playground' | 'comparison' | 'settings'
+  currentView: "playground", // 'playground' | 'comparison' | 'cotenancy' | 'concurrency' | 'help'
   
   // Configurations & Profiles
   profiles: initialProfiles,
@@ -122,6 +133,56 @@ export const store = reactive({
     error: "",
   },
 
+  // Co-tenancy benchmark: measure how two LLMs degrade each other when running
+  // on the same machine. Three phases (Solo A → Solo B → Paired A∥B), each run
+  // `iterations` times after `warmup` discarded runs; resulting deltas are the
+  // "cost of cohabitation". See `runCotenancy()`.
+  cotenancy: {
+    status: "idle", // idle | running | completed | error | cancelled
+    phase: null,    // null | 'solo-A' | 'solo-B' | 'paired'
+    phaseRun: 0,    // 1-based run number within the current phase (incl. warm-up)
+    phaseTotal: 0,  // warmup + iterations of the current phase
+    phaseWarmup: 0, // warm-up runs within the current phase
+    profileAIndex: 0,
+    profileBIndex: 1,
+    prompt: "",
+    iterations: 3,
+    warmup: 1,
+    live: { A: makeSink(), B: makeSink() }, // streamed during all phases
+    result: null,   // populated on completion (see saveCotenancyToHistory)
+    error: "",
+  },
+
+  // Co-tenancy session history (persisted, capped at MAX_COTENANCY_RUNS).
+  cotenancyRuns: initialCotenancyRuns,
+
+  // Concurrency benchmark: drive N parallel SSE workers (in Rust) against one
+  // endpoint for a fixed duration. Measures serving throughput + per-request
+  // latency distribution (p50/p95/p99). Frontend only orchestrates start/cancel;
+  // the actual HTTP & timing happens on the Rust side (see src-tauri/src/concurrency.rs).
+  concurrency: {
+    status: "idle",       // idle | running | completed | error | cancelled
+    profileIndex: 0,
+    prompt: "",
+    workers: 8,           // N concurrent in-flight requests
+    durationSecs: 30,
+    stallTimeoutSecs: 60,
+    live: {               // streamed every ~250ms by the Rust backend
+      elapsedMs: 0,
+      inFlight: 0,
+      completed: 0,
+      failed: 0,
+      aggregateTps: 0,
+      ttftP50Ms: null,
+      ttftP95Ms: null,
+    },
+    result: null,         // populated on completion (SummaryResult shape from Rust)
+    error: "",
+  },
+
+  // Concurrency session history (persisted).
+  concurrencyRuns: initialConcurrencyRuns,
+
   // Actions
   selectProfile(index) {
     this.activeProfileIndex = index;
@@ -145,27 +206,16 @@ export const store = reactive({
     setApiKey(name, this.config.apiKey || ""); // key goes to the vault, not localStorage
   },
 
-  // Persists the current form edits back into the active profile (issue #7 —
-  // edits no longer auto-overwrite the saved preset; this is the explicit save).
+  // Persists the current form edits back into the active profile. Called by the
+  // auto-save watcher below — explicit Save/Revert UI was removed at user
+  // request (the old issue #7 split was reverted: edits now flow to the active
+  // profile immediately, including default presets).
   saveActiveProfile() {
     const idx = this.activeProfileIndex;
     const name = this.profiles[idx].name;
     this.profiles[idx] = { ...this.config, name };
     persistProfiles();
     setApiKey(name, this.config.apiKey || "");
-  },
-
-  // Discards unsaved form edits, restoring the active profile's saved values.
-  revertActiveProfile() {
-    this.config = withBenchDefaults(this.profiles[this.activeProfileIndex]);
-  },
-
-  // True when the form differs from the saved profile (drives the Save/Revert UI).
-  isDirty() {
-    const saved = this.profiles[this.activeProfileIndex];
-    if (!saved) return false;
-    const keys = ["url", "apiKey", "model", "temperature", "maxTokens", "systemPrompt", "stream", "iterations", "warmup"];
-    return keys.some((k) => (this.config[k] ?? "") !== (saved[k] ?? ""));
   },
 
   deleteProfile(index) {
@@ -195,6 +245,69 @@ export const store = reactive({
   clearRuns() {
     this.runs = [];
     persistRuns();
+  },
+
+  saveCotenancyRun(run) {
+    this.cotenancyRuns.unshift(run);
+    if (this.cotenancyRuns.length > MAX_COTENANCY_RUNS) {
+      this.cotenancyRuns.length = MAX_COTENANCY_RUNS;
+    }
+    persistCotenancyRuns();
+  },
+
+  deleteCotenancyRun(id) {
+    this.cotenancyRuns = this.cotenancyRuns.filter((r) => r.id !== id);
+    persistCotenancyRuns();
+  },
+
+  clearCotenancyRuns() {
+    this.cotenancyRuns = [];
+    persistCotenancyRuns();
+  },
+
+  saveConcurrencyRun(run) {
+    this.concurrencyRuns.unshift(run);
+    if (this.concurrencyRuns.length > MAX_CONCURRENCY_RUNS) {
+      this.concurrencyRuns.length = MAX_CONCURRENCY_RUNS;
+    }
+    persistConcurrencyRuns();
+  },
+
+  deleteConcurrencyRun(id) {
+    this.concurrencyRuns = this.concurrencyRuns.filter((r) => r.id !== id);
+    persistConcurrencyRuns();
+  },
+
+  clearConcurrencyRuns() {
+    this.concurrencyRuns = [];
+    persistConcurrencyRuns();
+  },
+
+  resetConcurrency() {
+    this.concurrency.status = "idle";
+    this.concurrency.result = null;
+    this.concurrency.error = "";
+    this.concurrency.live = {
+      elapsedMs: 0,
+      inFlight: 0,
+      completed: 0,
+      failed: 0,
+      aggregateTps: 0,
+      ttftP50Ms: null,
+      ttftP95Ms: null,
+    };
+  },
+
+  resetCotenancy() {
+    this.cotenancy.status = "idle";
+    this.cotenancy.phase = null;
+    this.cotenancy.phaseRun = 0;
+    this.cotenancy.phaseTotal = 0;
+    this.cotenancy.phaseWarmup = 0;
+    this.cotenancy.result = null;
+    this.cotenancy.error = "";
+    resetSink(this.cotenancy.live.A);
+    resetSink(this.cotenancy.live.B);
   },
 
   resetActiveRun() {
@@ -232,31 +345,64 @@ function downsampleCurve(points) {
   return out;
 }
 
-// Persists run history with quota handling: on a QuotaExceededError, drop the
-// oldest half and retry until it fits, rather than throwing and losing data.
-function persistRuns() {
-  if (store.runs.length > MAX_RUNS) store.runs.length = MAX_RUNS;
+// Writes an in-store array to localStorage under `key`, capped at `max`. On a
+// QuotaExceededError we drop the oldest half and retry until it fits — better
+// than throwing and losing the whole history (issue #8). `get`/`set` are
+// accessors so the last-resort `set([])` is visible through the reactive store.
+function persistArray({ key, get, set, max, label }) {
+  if (get().length > max) get().length = max;
   try {
-    localStorage.setItem("speedometer_runs", JSON.stringify(store.runs));
+    localStorage.setItem(key, JSON.stringify(get()));
+    return;
   } catch (err) {
-    console.error("Failed to persist run history; trimming oldest entries:", err);
-    while (store.runs.length > 1) {
-      store.runs.splice(Math.ceil(store.runs.length / 2)); // drop the older half
-      try {
-        localStorage.setItem("speedometer_runs", JSON.stringify(store.runs));
-        return;
-      } catch {
-        // still too big — keep trimming
-      }
-    }
-    // Last resort: a single run that still won't fit — drop history entirely.
+    console.error(`Failed to persist ${label}; trimming oldest entries:`, err);
+  }
+  while (get().length > 1) {
+    get().splice(Math.ceil(get().length / 2)); // drop the older half
     try {
-      localStorage.setItem("speedometer_runs", JSON.stringify(store.runs));
+      localStorage.setItem(key, JSON.stringify(get()));
+      return;
     } catch {
-      store.runs = [];
-      localStorage.removeItem("speedometer_runs");
+      // still too big — keep trimming
     }
   }
+  // Last resort: a single entry that still won't fit — drop the lot.
+  try {
+    localStorage.setItem(key, JSON.stringify(get()));
+  } catch {
+    set([]);
+    localStorage.removeItem(key);
+  }
+}
+
+function persistRuns() {
+  persistArray({
+    key: "speedometer_runs",
+    get: () => store.runs,
+    set: (v) => { store.runs = v; },
+    max: MAX_RUNS,
+    label: "run history",
+  });
+}
+
+function persistCotenancyRuns() {
+  persistArray({
+    key: "speedometer_cotenancy_runs",
+    get: () => store.cotenancyRuns,
+    set: (v) => { store.cotenancyRuns = v; },
+    max: MAX_COTENANCY_RUNS,
+    label: "co-tenancy history",
+  });
+}
+
+function persistConcurrencyRuns() {
+  persistArray({
+    key: "speedometer_concurrency_runs",
+    get: () => store.concurrencyRuns,
+    set: (v) => { store.concurrencyRuns = v; },
+    max: MAX_CONCURRENCY_RUNS,
+    label: "concurrency history",
+  });
 }
 
 // On startup, reconcile each profile's key with secure storage: migrate any
@@ -278,80 +424,120 @@ async function initSecrets() {
 
 initSecrets();
 
-// Builds the OpenAI-compatible chat/completions request from the active config.
-function buildRequest(promptText) {
-  const url = store.config.url.trim().replace(/\/$/, "");
+// Auto-save: every edit in the Engine Parameters panel flows back into the
+// active profile (localStorage + vault) without an explicit Save button.
+// Debounced so rapid typing (e.g. API key, prompt) doesn't hammer the vault on
+// every keystroke. Switching profiles reassigns `store.config` to a new object,
+// which also triggers this — the resulting write is idempotent (same data back
+// into the same slot) so it's harmless.
+let autoSaveTimer = null;
+watch(
+  () => store.config,
+  () => {
+    if (!store.profiles[store.activeProfileIndex]) return;
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => store.saveActiveProfile(), 250);
+  },
+  { deep: true }
+);
+
+// Builds the OpenAI-compatible chat/completions request from the given config.
+function buildRequest(promptText, config) {
+  const url = config.url.trim().replace(/\/$/, "");
   const endpoint = `${url}/chat/completions`;
 
   const headers = { "Content-Type": "application/json" };
-  if (store.config.apiKey) {
-    headers["Authorization"] = `Bearer ${store.config.apiKey}`;
+  if (config.apiKey) {
+    headers["Authorization"] = `Bearer ${config.apiKey}`;
   }
 
   const messages = [];
-  if (store.config.systemPrompt) {
-    messages.push({ role: "system", content: store.config.systemPrompt });
+  if (config.systemPrompt) {
+    messages.push({ role: "system", content: config.systemPrompt });
   }
   messages.push({ role: "user", content: promptText });
 
   const body = {
-    model: store.config.model,
+    model: config.model,
     messages,
-    temperature: parseFloat(store.config.temperature) || 0.7,
-    max_tokens: parseInt(store.config.maxTokens) || 512,
-    stream: store.config.stream,
-    stream_options: store.config.stream ? { include_usage: true } : undefined,
+    temperature: parseFloat(config.temperature) || 0.7,
+    max_tokens: parseInt(config.maxTokens) || 512,
+    stream: config.stream,
+    stream_options: config.stream ? { include_usage: true } : undefined,
   };
 
   return { endpoint, headers, body };
 }
 
-// Snapshot of the live telemetry — one element of a series.
-function snapshotRun() {
+// Live-telemetry shape written into during a run. Both the single-run path
+// (`store.activeRun`, which embeds these fields) and the co-tenancy slots
+// (`store.cotenancy.live.A` / `.live.B`) use objects of this shape.
+function makeSink() {
   return {
-    ttft: store.activeRun.ttft,
-    tpot: store.activeRun.tpot,
-    tps: store.activeRun.tps,
-    tokenCount: store.activeRun.tokenCount,
-    promptTokens: store.activeRun.promptTokens,
-    completionTokens: store.activeRun.completionTokens,
-    totalTokens: store.activeRun.totalTokens,
-    responseText: store.activeRun.responseText,
-    streamDataPoints: [...store.activeRun.streamDataPoints],
+    responseText: "",
+    ttft: 0,
+    tpot: 0,
+    tps: 0,
+    tokenCount: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    streamDataPoints: [],
   };
 }
 
-// Executes a single high-fidelity request, updating the live telemetry as it
-// streams. Returns a snapshot of the run's metrics; throws on HTTP/abort errors
-// (the orchestrator decides how to surface them). Does not touch series state
-// or history — that is the caller's job.
-async function executeRun(promptText, controller) {
-  // Reset only the per-run live fields, leaving status/error/prompt to the caller.
-  store.activeRun.responseText = "";
-  store.activeRun.ttft = 0;
-  store.activeRun.tpot = 0;
-  store.activeRun.tps = 0;
-  store.activeRun.tokenCount = 0;
-  store.activeRun.promptTokens = 0;
-  store.activeRun.completionTokens = 0;
-  store.activeRun.totalTokens = 0;
-  store.activeRun.streamDataPoints = [];
+// Snapshot of one sink's telemetry — one element of a series.
+function snapshotRun(sink) {
+  return {
+    ttft: sink.ttft,
+    tpot: sink.tpot,
+    tps: sink.tps,
+    tokenCount: sink.tokenCount,
+    promptTokens: sink.promptTokens,
+    completionTokens: sink.completionTokens,
+    totalTokens: sink.totalTokens,
+    responseText: sink.responseText,
+    streamDataPoints: [...sink.streamDataPoints],
+  };
+}
 
-  const { endpoint, headers, body } = buildRequest(promptText);
+// Wipes a sink back to neutral state (no status/prompt fields — those belong
+// to the caller's wrapper, e.g. `store.activeRun.status`).
+function resetSink(sink) {
+  sink.responseText = "";
+  sink.ttft = 0;
+  sink.tpot = 0;
+  sink.tps = 0;
+  sink.tokenCount = 0;
+  sink.promptTokens = 0;
+  sink.completionTokens = 0;
+  sink.totalTokens = 0;
+  sink.streamDataPoints = [];
+}
+
+// Executes a single high-fidelity request, updating the given `sink` (a
+// makeSink()-shaped object) as it streams. Returns a snapshot of the run's
+// metrics; throws on HTTP/abort errors. Abort cause is propagated via
+// `controller.signal.reason` ('user' | 'timeout' | 'peer-failed'), so the
+// caller can distinguish them. Does not touch series/co-tenancy/history state
+// — that is the caller's job. Configurable via the passed `config` (a profile
+// snapshot), so multiple runs against different endpoints can fly in parallel.
+async function executeRun(promptText, config, controller, sink) {
+  resetSink(sink);
+
+  const { endpoint, headers, body } = buildRequest(promptText, config);
 
   const startTime = performance.now();
   let firstTokenTime = null;
   let lastTokenTime = null;
   let tokenCount = 0;
 
-  // Inactivity timeout for this request (issue #4); aborts the shared controller.
+  // Inactivity timeout for this request (issue #4); aborts only THIS controller
+  // (so a peer in a paired run is unaffected by one side stalling).
   let stallTimer = null;
   const armStall = () => {
     clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => {
-      abortKind = "timeout";
-      controller.abort();
-    }, STALL_TIMEOUT_MS);
+    stallTimer = setTimeout(() => controller.abort("timeout"), STALL_TIMEOUT_MS);
   };
 
   try {
@@ -368,7 +554,7 @@ async function executeRun(promptText, controller) {
       throw new Error(`API Error (${response.status}): ${errText || response.statusText}`);
     }
 
-    if (!store.config.stream) {
+    if (!config.stream) {
       // Non-streaming Mode
       const data = await response.json();
       const totalTime = performance.now() - startTime;
@@ -379,27 +565,36 @@ async function executeRun(promptText, controller) {
       const compTokens = usage.completion_tokens || text.split(/\s+/).filter(Boolean).length || 1;
       const promptTokens = usage.prompt_tokens || promptText.split(/\s+/).filter(Boolean).length || 1;
 
-      store.activeRun.responseText = text;
-      store.activeRun.tokenCount = compTokens;
-      store.activeRun.promptTokens = promptTokens;
-      store.activeRun.completionTokens = compTokens;
-      store.activeRun.totalTokens = promptTokens + compTokens;
+      sink.responseText = text;
+      sink.tokenCount = compTokens;
+      sink.promptTokens = promptTokens;
+      sink.completionTokens = compTokens;
+      sink.totalTokens = promptTokens + compTokens;
 
       // TTFT and TPOT cannot be measured without streaming — the response
       // arrives as a single blob, so prefill and decode are indistinguishable.
       // Report them as unavailable (null -> "--") rather than fabricating a split.
-      store.activeRun.ttft = null;
-      store.activeRun.tpot = null;
+      sink.ttft = null;
+      sink.tpot = null;
       // Aggregate throughput over the whole request is still meaningful
-      store.activeRun.tps = parseFloat((compTokens / (totalTime / 1000)).toFixed(2));
-      store.activeRun.streamDataPoints = [
+      sink.tps = parseFloat((compTokens / (totalTime / 1000)).toFixed(2));
+      sink.streamDataPoints = [
         { time: 0, tps: 0 },
-        { time: totalTime / 1000, tps: store.activeRun.tps },
+        { time: totalTime / 1000, tps: sink.tps },
       ];
-      return snapshotRun();
+      return snapshotRun(sink);
     }
 
-    // Streaming Mode
+    // Streaming Mode — proper SSE parsing per W3C EventSource spec:
+    //   - Lines may end in \r\n, \r, or \n.
+    //   - Events are separated by a blank line (one or more line terminators in
+    //     a row, i.e. >=2 consecutive terminators).
+    //   - Within an event: lines starting with ':' are comments; multiple
+    //     `data:` lines accumulate (joined by '\n') into one payload; one
+    //     optional leading space after the colon is stripped. We ignore
+    //     `event:`, `id:`, `retry:` — irrelevant for OpenAI-compatible streams.
+    const EVENT_SEP = /(?:\r\n|\r|\n){2,}/;
+    const LINE_SEP = /\r\n|\r|\n/;
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
@@ -410,61 +605,68 @@ async function executeRun(promptText, controller) {
 
       armStall(); // bytes arrived — reset the inactivity timer
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop(); // keep last incomplete line
+      const events = buffer.split(EVENT_SEP);
+      buffer = events.pop(); // keep tail (possibly incomplete event) for next chunk
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (trimmed === "data: [DONE]") continue;
+      for (const block of events) {
+        let payload = null;
+        for (const line of block.split(LINE_SEP)) {
+          if (!line || line.startsWith(":")) continue; // empty / comment
+          if (line.startsWith("data:")) {
+            let v = line.slice(5);
+            if (v.startsWith(" ")) v = v.slice(1); // strip single leading space (spec)
+            payload = payload == null ? v : payload + "\n" + v;
+          }
+          // Ignore event: / id: / retry: — unused for OpenAI-compatible streams.
+        }
+        if (payload == null) continue;
+        if (payload === "[DONE]") continue;
 
-        if (trimmed.startsWith("data: ")) {
-          try {
-            const rawJson = trimmed.slice(6);
-            const data = JSON.parse(rawJson);
+        let data;
+        try {
+          data = JSON.parse(payload);
+        } catch {
+          continue; // partial / malformed payload — skip
+        }
 
-            // 1. Extract content delta
-            const content = data.choices?.[0]?.delta?.content || "";
+        // 1. Extract content delta
+        const content = data.choices?.[0]?.delta?.content || "";
 
-            // 2. Extract metrics if available (e.g. usage statistics)
-            if (data.usage) {
-              store.activeRun.promptTokens = data.usage.prompt_tokens;
-              store.activeRun.completionTokens = data.usage.completion_tokens;
-              store.activeRun.totalTokens = data.usage.total_tokens;
-            }
+        // 2. Extract metrics if available (e.g. usage statistics)
+        if (data.usage) {
+          sink.promptTokens = data.usage.prompt_tokens;
+          sink.completionTokens = data.usage.completion_tokens;
+          sink.totalTokens = data.usage.total_tokens;
+        }
 
-            // 3. Extract custom engine specifics (e.g., Ollama metadata)
-            if (data.prompt_eval_count || data.eval_count) {
-              store.activeRun.promptTokens = data.prompt_eval_count || store.activeRun.promptTokens;
-              store.activeRun.completionTokens = data.eval_count || store.activeRun.completionTokens;
-              store.activeRun.totalTokens = (data.prompt_eval_count || 0) + (data.eval_count || 0);
-            }
+        // 3. Extract custom engine specifics (e.g., Ollama metadata)
+        if (data.prompt_eval_count || data.eval_count) {
+          sink.promptTokens = data.prompt_eval_count || sink.promptTokens;
+          sink.completionTokens = data.eval_count || sink.completionTokens;
+          sink.totalTokens = (data.prompt_eval_count || 0) + (data.eval_count || 0);
+        }
 
-            if (content) {
-              const now = performance.now();
-              if (firstTokenTime === null) {
-                firstTokenTime = now;
-                store.activeRun.ttft = Math.round(firstTokenTime - startTime);
-              }
+        if (content) {
+          const now = performance.now();
+          if (firstTokenTime === null) {
+            firstTokenTime = now;
+            sink.ttft = Math.round(firstTokenTime - startTime);
+          }
 
-              store.activeRun.responseText += content;
-              tokenCount++;
-              store.activeRun.tokenCount = tokenCount;
-              lastTokenTime = now;
+          sink.responseText += content;
+          tokenCount++;
+          sink.tokenCount = tokenCount;
+          lastTokenTime = now;
 
-              // Calculate current active TPS
-              const elapsedSecs = (now - firstTokenTime) / 1000;
-              if (elapsedSecs > 0) {
-                const currentTps = parseFloat((tokenCount / elapsedSecs).toFixed(2));
-                store.activeRun.tps = currentTps;
-                store.activeRun.streamDataPoints.push({
-                  time: parseFloat(elapsedSecs.toFixed(2)),
-                  tps: currentTps,
-                });
-              }
-            }
-          } catch (e) {
-            // Ignore JSON parsing errors for partial or malformed chunks
+          // Calculate current active TPS
+          const elapsedSecs = (now - firstTokenTime) / 1000;
+          if (elapsedSecs > 0) {
+            const currentTps = parseFloat((tokenCount / elapsedSecs).toFixed(2));
+            sink.tps = currentTps;
+            sink.streamDataPoints.push({
+              time: parseFloat(elapsedSecs.toFixed(2)),
+              tps: currentTps,
+            });
           }
         }
       }
@@ -476,28 +678,50 @@ async function executeRun(promptText, controller) {
     // Prefer the server-reported completion token count for accuracy.
     // The chunk count (tokenCount) is only a fallback: one SSE chunk is not
     // guaranteed to equal one token, so it would skew TPS/TPOT.
-    const usageTokens = store.activeRun.completionTokens || 0;
+    const usageTokens = sink.completionTokens || 0;
     const tokensForMetrics = usageTokens > 0 ? usageTokens : tokenCount;
 
     // Finalize TTFT / TPOT / TPS using the most accurate token count available
     if (firstTokenTime !== null && lastTokenTime !== null && tokensForMetrics > 0) {
-      store.activeRun.tpot = Math.round((lastTokenTime - firstTokenTime) / tokensForMetrics);
+      // TPOT = average time per decoded token. The span first→last token covers
+      // (N-1) inter-token intervals, not N, and the very first token belongs to
+      // prefill (TTFT), so it is excluded from the decode average. Dividing by N
+      // would understate TPOT (issue #10). With <2 tokens there is no interval to
+      // measure, so TPOT is undefined.
+      sink.tpot =
+        tokensForMetrics > 1
+          ? Math.round((lastTokenTime - firstTokenTime) / (tokensForMetrics - 1))
+          : null;
       const totalTimeSecs = (finalTime - firstTokenTime) / 1000;
-      store.activeRun.tps = parseFloat((tokensForMetrics / (totalTimeSecs || 0.001)).toFixed(2));
+      sink.tps = parseFloat((tokensForMetrics / (totalTimeSecs || 0.001)).toFixed(2));
+
+      // Reconcile the live throughput curve with the finalized TPS. During the
+      // stream every curve point was computed from the SSE chunk counter, but
+      // one chunk ≠ one token; the headline TPS uses server-reported
+      // `usage.completion_tokens` (when present). Without this rescale the saved
+      // curve would sit on a different scale from the number on the metric card
+      // and from historical Comparison runs. We rescale only when usage tokens
+      // were actually reported (otherwise scale == 1 and this is a no-op).
+      if (usageTokens > 0 && tokenCount > 0 && usageTokens !== tokenCount) {
+        const scale = usageTokens / tokenCount;
+        for (const pt of sink.streamDataPoints) {
+          pt.tps = parseFloat((pt.tps * scale).toFixed(2));
+        }
+      }
     }
 
     // Default calculations if usage stats not provided
-    if (!store.activeRun.promptTokens) {
-      store.activeRun.promptTokens = promptText.split(/\s+/).filter(Boolean).length;
+    if (!sink.promptTokens) {
+      sink.promptTokens = promptText.split(/\s+/).filter(Boolean).length;
     }
-    if (!store.activeRun.completionTokens) {
-      store.activeRun.completionTokens = tokenCount;
+    if (!sink.completionTokens) {
+      sink.completionTokens = tokenCount;
     }
     // Keep the audited token count consistent with the metrics source
-    store.activeRun.tokenCount = tokensForMetrics;
-    store.activeRun.totalTokens = store.activeRun.promptTokens + store.activeRun.completionTokens;
+    sink.tokenCount = tokensForMetrics;
+    sink.totalTokens = sink.promptTokens + sink.completionTokens;
 
-    return snapshotRun();
+    return snapshotRun(sink);
   } finally {
     clearTimeout(stallTimer);
   }
@@ -518,7 +742,6 @@ export async function runBenchmark(promptText) {
   // Shared controller so a single cancel/timeout aborts the whole series.
   const controller = new AbortController();
   activeController = controller;
-  abortKind = null;
 
   store.series.status = "running";
   store.series.total = total;
@@ -531,7 +754,7 @@ export async function runBenchmark(promptText) {
   try {
     for (let i = 0; i < total; i++) {
       store.series.current = i + 1;
-      const result = await executeRun(promptText, controller);
+      const result = await executeRun(promptText, store.config, controller, store.activeRun);
       if (i >= warmup) {
         measured.push(result);
         store.series.kept = measured.length;
@@ -543,13 +766,13 @@ export async function runBenchmark(promptText) {
     store.activeRun.status = "completed";
     saveSeriesToHistory(promptText, measured, store.series.agg);
   } catch (err) {
-    const aborted = abortKind || err.name === "AbortError";
-    if (aborted && abortKind === "user") {
+    const reason = controller.signal.reason;
+    if (reason === "user") {
       // Keep any partial output; this was a deliberate stop, not a failure.
       store.activeRun.status = "cancelled";
       store.series.status = "cancelled";
       store.activeRun.error = "Benchmark cancelled.";
-    } else if (aborted) {
+    } else if (reason === "timeout") {
       store.activeRun.status = "error";
       store.series.status = "error";
       store.activeRun.error = `Request timed out after ${STALL_TIMEOUT_MS / 1000}s with no response.`;
@@ -567,8 +790,7 @@ export async function runBenchmark(promptText) {
 // Abort the in-flight benchmark/series, if any (issue #4).
 export function cancelBenchmark() {
   if (activeController) {
-    abortKind = "user";
-    activeController.abort();
+    activeController.abort("user");
   }
 }
 
@@ -656,4 +878,277 @@ function saveSeriesToHistory(promptText, measured, agg) {
     agg,                         // full { median, min, max } per metric
   };
   store.saveRun(newRun);
+}
+
+// --- Co-tenancy benchmark -------------------------------------------------
+//
+// Measures how two LLMs degrade each other when sharing one machine.
+// Sequential phases (solo A → solo B → paired A∥B) prevent paired runs from
+// thermally pre-warming the GPU before baselines — that order would deflate
+// solos and inflate the headline delta.
+
+// Runs `warmup + iterations` of `executeRun(config)` into `sink`, keeping the
+// measured snapshots. Updates phase progress on `store.cotenancy` so the UI
+// can render "run i/N". Throws if the controller is aborted or an HTTP error
+// surfaces — orchestrator handles the catch.
+async function runPhase(phaseId, config, sink, controller) {
+  const ct = store.cotenancy;
+  ct.phase = phaseId;
+  ct.phaseTotal = ct.warmup + ct.iterations;
+  ct.phaseWarmup = ct.warmup;
+  ct.phaseRun = 0;
+
+  const measured = [];
+  for (let i = 0; i < ct.phaseTotal; i++) {
+    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    ct.phaseRun = i + 1;
+    const result = await executeRun(ct.prompt, config, controller, sink);
+    if (i >= ct.warmup) measured.push(result);
+  }
+  return aggregate(measured);
+}
+
+// Δ = (paired − solo) / solo. Positive means worse for latency metrics
+// (TTFT/TPOT), negative means worse for throughput (TPS). Returns null when
+// either side is missing (e.g. TTFT/TPOT in non-streaming mode).
+function computeDelta(solo, paired) {
+  const ratio = (s, p) =>
+    s == null || p == null || s.median === 0 ? null : (p.median - s.median) / s.median;
+  return {
+    ttft: ratio(solo.ttft, paired.ttft),
+    tpot: ratio(solo.tpot, paired.tpot),
+    tps: ratio(solo.tps, paired.tps),
+  };
+}
+
+export async function runCotenancy() {
+  const ct = store.cotenancy;
+  const profA = store.profiles[ct.profileAIndex];
+  const profB = store.profiles[ct.profileBIndex];
+  if (!profA || !profB) {
+    ct.status = "error";
+    ct.error = "Select profiles A and B before running.";
+    return;
+  }
+  if (!ct.prompt.trim()) {
+    ct.status = "error";
+    ct.error = "Prompt is required.";
+    return;
+  }
+  // Snapshot the configs so user edits during the run don't leak in mid-test.
+  const configA = { ...profA };
+  const configB = { ...profB };
+
+  store.resetCotenancy();
+  ct.status = "running";
+  ct.iterations = Math.max(1, parseInt(ct.iterations) || 1);
+  ct.warmup = Math.max(0, parseInt(ct.warmup) || 0);
+
+  const ctrlA = new AbortController();
+  const ctrlB = new AbortController();
+  cotenancyControllers = { A: ctrlA, B: ctrlB };
+
+  try {
+    // ---- Phase 1: Solo A ----
+    const soloA = await runPhase("solo-A", configA, ct.live.A, ctrlA);
+
+    // ---- Phase 2: Solo B ----
+    if (ctrlA.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const soloB = await runPhase("solo-B", configB, ct.live.B, ctrlB);
+
+    // ---- Phase 3: Paired A∥B ----
+    if (ctrlA.signal.aborted || ctrlB.signal.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    ct.phase = "paired";
+    ct.phaseTotal = ct.warmup + ct.iterations;
+    ct.phaseWarmup = ct.warmup;
+    ct.phaseRun = 0;
+
+    const pairedA = [];
+    const pairedB = [];
+    for (let i = 0; i < ct.phaseTotal; i++) {
+      if (ctrlA.signal.aborted || ctrlB.signal.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      ct.phaseRun = i + 1;
+
+      // Wire each side to abort its peer on failure so we don't waste tokens
+      // on a half-paired run. Note: this fires only on hard errors / timeouts,
+      // not on normal completion.
+      const runA = executeRun(ct.prompt, configA, ctrlA, ct.live.A).catch((err) => {
+        if (!ctrlB.signal.aborted) ctrlB.abort("peer-failed");
+        throw err;
+      });
+      const runB = executeRun(ct.prompt, configB, ctrlB, ct.live.B).catch((err) => {
+        if (!ctrlA.signal.aborted) ctrlA.abort("peer-failed");
+        throw err;
+      });
+      const [resA, resB] = await Promise.all([runA, runB]);
+      if (i >= ct.warmup) {
+        pairedA.push(resA);
+        pairedB.push(resB);
+      }
+    }
+    const pairAgg = { A: aggregate(pairedA), B: aggregate(pairedB) };
+
+    // ---- Finalize ----
+    ct.result = {
+      solo: { A: soloA, B: soloB },
+      paired: pairAgg,
+      delta: { A: computeDelta(soloA, pairAgg.A), B: computeDelta(soloB, pairAgg.B) },
+    };
+    ct.status = "completed";
+    saveCotenancyToHistory(configA, configB);
+  } catch (err) {
+    const userCancelled =
+      ctrlA.signal.reason === "user" || ctrlB.signal.reason === "user";
+    const timedOut =
+      ctrlA.signal.reason === "timeout" || ctrlB.signal.reason === "timeout";
+    if (userCancelled) {
+      ct.status = "cancelled";
+      ct.error = "Co-tenancy test cancelled.";
+    } else if (timedOut) {
+      ct.status = "error";
+      ct.error = `One endpoint went idle longer than ${STALL_TIMEOUT_MS / 1000}s.`;
+    } else {
+      ct.status = "error";
+      ct.error = err?.message || String(err);
+    }
+    console.error("Co-tenancy error:", err);
+  } finally {
+    cotenancyControllers = null;
+  }
+}
+
+export function cancelCotenancy() {
+  if (cotenancyControllers) {
+    cotenancyControllers.A.abort("user");
+    cotenancyControllers.B.abort("user");
+  }
+}
+
+// --- Concurrency benchmark -----------------------------------------------
+//
+// Thin orchestration over the Rust `run_concurrency_benchmark` command. The
+// actual N parallel SSE workers run in tokio on the Rust side; we just pass
+// the config, subscribe to a Channel for live progress updates, and store the
+// final SummaryResult. Web preview (`bun dev`, no Tauri) cannot run this and
+// shows an error.
+export async function runConcurrency() {
+  const c = store.concurrency;
+  const profile = store.profiles[c.profileIndex];
+  if (!profile) {
+    c.status = "error";
+    c.error = "Select a profile first.";
+    return;
+  }
+  if (!c.prompt.trim()) {
+    c.status = "error";
+    c.error = "Prompt is required.";
+    return;
+  }
+  if (!isTauri()) {
+    c.status = "error";
+    c.error = "Concurrency mode needs the desktop app (Rust backend).";
+    return;
+  }
+
+  store.resetConcurrency();
+  c.status = "running";
+
+  const config = {
+    url: (profile.url || "").trim().replace(/\/$/, ""),
+    apiKey: profile.apiKey || "",
+    model: profile.model || "",
+    systemPrompt: profile.systemPrompt || "",
+    temperature: parseFloat(profile.temperature) || 0.7,
+    maxTokens: parseInt(profile.maxTokens) || 512,
+    prompt: c.prompt,
+    concurrency: Math.max(1, parseInt(c.workers) || 1),
+    durationSecs: Math.max(1, parseInt(c.durationSecs) || 30),
+    stallTimeoutSecs: Math.max(1, parseInt(c.stallTimeoutSecs) || 60),
+  };
+
+  // Channel<ProgressEvent> — Rust pushes ~4 events/sec while running.
+  const channel = new Channel();
+  channel.onmessage = (event) => {
+    if (event?.type === "progress") {
+      c.live.elapsedMs = event.elapsedMs;
+      c.live.inFlight = event.inFlight;
+      c.live.completed = event.completed;
+      c.live.failed = event.failed;
+      c.live.aggregateTps = event.aggregateTps;
+      c.live.ttftP50Ms = event.ttftP50Ms;
+      c.live.ttftP95Ms = event.ttftP95Ms;
+    }
+  };
+
+  try {
+    const summary = await invoke("run_concurrency_benchmark", {
+      config,
+      onEvent: channel,
+    });
+    c.result = summary;
+    c.status = "completed";
+    saveConcurrencyToHistory(profile, config);
+  } catch (err) {
+    // User cancellation cleanly ends the command on the Rust side too — the
+    // task returns a summary with whatever data was collected. If we land here
+    // it's a real error (invoke threw).
+    c.status = "error";
+    c.error = typeof err === "string" ? err : err?.message || String(err);
+    console.error("Concurrency benchmark error:", err);
+  }
+}
+
+export async function cancelConcurrency() {
+  if (!isTauri()) return;
+  try {
+    await invoke("cancel_concurrency_benchmark");
+  } catch (err) {
+    console.error("Failed to send cancel:", err);
+  }
+}
+
+function saveConcurrencyToHistory(profile, config) {
+  const c = store.concurrency;
+  if (!c.result) return;
+  store.saveConcurrencyRun({
+    id:
+      (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    timestamp: new Date().toISOString(),
+    profileName: profile.name,
+    modelName: config.model,
+    url: config.url,
+    prompt: c.prompt,
+    workers: config.concurrency,
+    durationSecs: config.durationSecs,
+    result: c.result,
+  });
+}
+
+function saveCotenancyToHistory(configA, configB) {
+  const ct = store.cotenancy;
+  if (!ct.result) return;
+  store.saveCotenancyRun({
+    id: Date.now().toString(),
+    timestamp: new Date().toISOString(),
+    iterations: ct.iterations,
+    warmup: ct.warmup,
+    prompt: ct.prompt,
+    A: {
+      profileName: configA.name,
+      modelName: configA.model,
+      url: configA.url,
+    },
+    B: {
+      profileName: configB.name,
+      modelName: configB.model,
+      url: configB.url,
+    },
+    result: ct.result,
+  });
 }

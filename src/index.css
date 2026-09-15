@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import './assets/fonts/fonts.css';
 
 :root {
   --bg-main: #0B0F19;
@@ -163,6 +163,12 @@ input:focus, select:focus, textarea:focus {
   background: var(--surface-3);
 }
 
+input:disabled, select:disabled, textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--surface-1);
+}
+
 label {
   display: block;
   font-size: 12px;
@@ -250,4 +256,105 @@ label {
 
 .pulse-glow {
   animation: pulse-glow 2s infinite ease-in-out;
+}
+
+/* Rendered LLM markdown — headings/lists/code/tables. Code blocks always use a
+   dark background (highlight.js github-dark theme) regardless of UI theme so
+   they read as "terminal/code", which is a common pattern even on light UIs. */
+.markdown > *:first-child { margin-top: 0; }
+.markdown > *:last-child { margin-bottom: 0; }
+
+.markdown h1, .markdown h2, .markdown h3,
+.markdown h4, .markdown h5, .markdown h6 {
+  color: var(--text-primary);
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 1.25em 0 0.5em;
+}
+.markdown h1 { font-size: 1.5em; }
+.markdown h2 { font-size: 1.3em; }
+.markdown h3 { font-size: 1.15em; }
+.markdown h4, .markdown h5, .markdown h6 { font-size: 1em; }
+
+.markdown p {
+  margin: 0 0 0.75em;
+  line-height: 1.6;
+}
+
+.markdown ul, .markdown ol {
+  margin: 0 0 0.75em;
+  padding-left: 1.5em;
+}
+.markdown li { margin: 0.15em 0; }
+.markdown li > p:last-child { margin-bottom: 0; }
+
+.markdown blockquote {
+  margin: 0 0 0.75em;
+  padding: 0.25em 0.9em;
+  border-left: 3px solid var(--accent-indigo);
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border-radius: 0 6px 6px 0;
+}
+
+.markdown a {
+  color: var(--accent-cyan);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown a:hover { filter: brightness(1.2); }
+
+.markdown strong { font-weight: 700; color: var(--text-primary); }
+.markdown em { font-style: italic; }
+.markdown del { opacity: 0.6; }
+
+/* Inline code */
+.markdown code {
+  background: rgba(110, 118, 129, 0.2);
+  color: var(--text-primary);
+  padding: 0.12em 0.4em;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.9em;
+}
+
+/* Fenced code block (highlight.js theme handles inner token colors) */
+.markdown pre {
+  margin: 0 0 0.75em;
+  padding: 14px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  background: #0d1117; /* github-dark canvas */
+  border: 1px solid var(--border-color);
+}
+.markdown pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+  color: inherit;
+}
+
+.markdown hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 1em 0;
+}
+
+.markdown table {
+  border-collapse: collapse;
+  margin: 0 0 0.75em;
+  width: 100%;
+  font-size: 0.92em;
+}
+.markdown th, .markdown td {
+  border: 1px solid var(--border-color);
+  padding: 6px 10px;
+  text-align: left;
+}
+.markdown th {
+  background: var(--surface-2);
+  font-weight: 600;
+  color: var(--text-primary);
 }

@@ -41,7 +41,7 @@ async function removeProfile(index, event) {
 <template>
   <aside class="sidebar glass-panel">
     <div class="brand">
-      <div class="logo-icon">⚡</div>
+      <img src="../assets/logo.png" alt="Verbodus Logo" class="logo-img" />
       <h2>Verbodus</h2>
     </div>
 
@@ -53,12 +53,33 @@ async function removeProfile(index, event) {
       >
         <span class="icon">🎮</span> Playground
       </button>
-      <button 
-        class="nav-btn" 
+      <button
+        class="nav-btn"
         :class="{ active: store.currentView === 'comparison' }"
         @click="store.currentView = 'comparison'"
       >
         <span class="icon">📊</span> Run Comparison
+      </button>
+      <button
+        class="nav-btn"
+        :class="{ active: store.currentView === 'cotenancy' }"
+        @click="store.currentView = 'cotenancy'"
+      >
+        <span class="icon">🧪</span> Co-Tenancy
+      </button>
+      <button
+        class="nav-btn"
+        :class="{ active: store.currentView === 'concurrency' }"
+        @click="store.currentView = 'concurrency'"
+      >
+        <span class="icon">⚡</span> Concurrency
+      </button>
+      <button
+        class="nav-btn"
+        :class="{ active: store.currentView === 'help' }"
+        @click="store.currentView = 'help'"
+      >
+        <span class="icon">📖</span> Metrics &amp; Help
       </button>
     </nav>
 
@@ -135,11 +156,11 @@ async function removeProfile(index, event) {
   margin-bottom: 32px;
 }
 
-.logo-icon {
-  font-size: 24px;
-  background: var(--accent-gradient);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+.logo-img {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  border-radius: 6px;
   filter: drop-shadow(0 2px 8px rgba(6, 182, 212, 0.4));
 }
 

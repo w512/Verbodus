@@ -1,9 +1,23 @@
 <script setup>
+import { computed } from "vue";
 import { store } from "./store/store.js";
 import Sidebar from "./components/Sidebar.vue";
 import Speedometer from "./components/Speedometer.vue";
 import Comparison from "./components/Comparison.vue";
+import Cotenancy from "./components/Cotenancy.vue";
+import Concurrency from "./components/Concurrency.vue";
+import MetricsHelp from "./components/MetricsHelp.vue";
 import ModalDialog from "./components/ModalDialog.vue";
+
+const currentComponent = computed(() => {
+  switch (store.currentView) {
+    case "comparison": return Comparison;
+    case "cotenancy": return Cotenancy;
+    case "concurrency": return Concurrency;
+    case "help": return MetricsHelp;
+    default: return Speedometer;
+  }
+});
 </script>
 
 <template>
@@ -14,7 +28,7 @@ import ModalDialog from "./components/ModalDialog.vue";
     <!-- Main View Display Area -->
     <main class="view-container">
       <KeepAlive>
-        <component :is="store.currentView === 'playground' ? Speedometer : Comparison" />
+        <component :is="currentComponent" />
       </KeepAlive>
     </main>
 
